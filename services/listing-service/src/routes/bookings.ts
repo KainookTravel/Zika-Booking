@@ -3475,6 +3475,7 @@ export async function bookingRoutes(app: FastifyInstance) {
       id: booking.id,
       reference: booking.reference,
       status: booking.status,
+      hasReview: Boolean((booking as any).review),
       listingType: booking.listingType,
       listing: {
         id: booking.listing.id,
@@ -3692,6 +3693,7 @@ export async function bookingRoutes(app: FastifyInstance) {
                 },
               },
             },
+            review: true,
           },
         });
         if (!full)
@@ -4437,6 +4439,7 @@ export async function bookingRoutes(app: FastifyInstance) {
                 },
               },
             },
+            review: true,
           },
         });
 

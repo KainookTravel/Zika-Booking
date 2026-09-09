@@ -10,6 +10,7 @@ import { logoutUser } from "@/lib/api";
 import { Avatar } from "@/components/ui/Avatar";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { LanguageDropdown } from "@/components/translation/LanguageDropdown";
 
 async function fetchUnreadNotifications() {
   try {
@@ -110,8 +111,12 @@ export function TopBar({ onToggleSidebar }: TopBarProps) {
         </Link>
       </div>
 
-      {/* Right — notification + user */}
+      {/* Right — language + notification + user */}
       <div className="flex items-center gap-2">
+        <LanguageDropdown
+          buttonClassName="bg-white/10 text-white border-white/15 hover:bg-white/20 hover:text-white hover:border-white/30"
+        />
+
         {/* Notification bell */}
         <Link
           href="/dashboard/notifications"

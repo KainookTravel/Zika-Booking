@@ -21,6 +21,7 @@ interface RoomTypeCardProps {
   onSelect: () => void;
   currency?: string;
   discountPercent?: number | null;
+  isUnavailableForDates?: boolean;
 }
 
 const GREEN = "#15803D";
@@ -41,6 +42,7 @@ export function RoomTypeCard({
   onSelect,
   currency = "XAF",
   discountPercent,
+  isUnavailableForDates,
 }: RoomTypeCardProps) {
   const basePrice = typeof roomType.pricePerNight === "number"
     ? roomType.pricePerNight
@@ -56,6 +58,7 @@ export function RoomTypeCard({
       style={[
         styles.card,
         selected ? styles.cardSelected : styles.cardUnselected,
+        isUnavailableForDates && !selected && styles.cardUnavailable,
       ]}
     >
       {/* Selection radio indicator */}
@@ -68,6 +71,12 @@ export function RoomTypeCard({
                 {formatRoomTypeCategory(roomType.roomType)}
               </Text>
             </View>
+            {isUnavailableForDates && (
+              <View style={styles.unavailableBadge}>
+                <Ionicons name="alert-circle" size={11} color="#B45309" />
+                <Text style={styles.unavailableBadgeText}>Unavailable</Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -141,6 +150,26 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 6,
     elevation: 3,
+  },
+  cardUnavailable: {
+    backgroundColor: "#FFFBEB",
+    borderColor: "#FDE68A",
+  },
+  unavailableBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#FCD34D",
+  },
+  unavailableBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#B45309",
   },
   topRow: {
     flexDirection: "row",

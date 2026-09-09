@@ -12,6 +12,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { CurrencyDropdown } from "./CurrencyDropdown";
+import { LanguageDropdown } from "@/components/translation/LanguageDropdown";
 
 const TRAVELLER_ROUTES = {
   destinations: "/",
@@ -219,7 +220,8 @@ export function TravellerHeader({
                 <Menu className="h-5 w-5 text-slate-700" />
               </button>
 
-              <div className="hidden sm:block">
+              <div className="hidden sm:flex items-center gap-2">
+                <LanguageDropdown />
                 <CurrencyDropdown />
               </div>
 
@@ -461,7 +463,8 @@ export function TravellerHeader({
           {mobileMenuOpen && (
             <div className="border-t border-slate-100 bg-white px-4 py-4 sm:px-6 lg:px-8 md:hidden">
               <div className="space-y-4">
-                <div className="flex justify-end">
+                <div className="flex items-center justify-end gap-2">
+                  <LanguageDropdown />
                   <CurrencyDropdown />
                 </div>
                 <div className="grid gap-2">

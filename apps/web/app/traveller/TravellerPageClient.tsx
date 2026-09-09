@@ -23,13 +23,80 @@ import { isPromotionValid } from "./utils/promo-utils";
 import PhotoGallery from "./components/PhotoGallery";
 import ReservationCard from "./components/ReservationCard";
 import MapView from "./components/MapView";
-import DateRangePicker from "./components/DateRangePicker";
+import DateRangePicker, { fmtDisplayDate } from "./components/DateRangePicker";
 import PriceRangeFields from "./components/PriceRangeFields";
 import type { PublicListingDetail } from "@/types";
 import { isTaraCountry } from "@zika/types";
 import { geocodePlaceText, getSearchOrigin } from "@/lib/geo";
 import { PlaceAutocomplete } from "@/components/maps/PlaceAutocomplete";
 import type { ResolvedPlace } from "@/lib/google-maps";
+import { getCountry } from "countries-and-timezones";
+import { ALL_COUNTRIES } from "@/lib/countries";
+
+interface DynamicCuratedDestination {
+  key: string;
+  town: string;
+  country: string;
+  displayName: string;
+  count: number;
+  img: string;
+  primaryCategory: "hotel" | "apartment" | "car";
+  minDistance: number;
+}
+
+function formatCountryName(c: string): string {
+  if (!c) return "";
+  const trimmed = c.trim();
+  if (trimmed.length === 2) {
+    const match = ALL_COUNTRIES.find((item) => item.code.toUpperCase() === trimmed.toUpperCase());
+    if (match) return match.name;
+  }
+  return trimmed;
+}
+
+function parseDateStr(str: string): Date {
+  const [y, m, d] = str.split("-").map(Number);
+  return new Date(y!, m! - 1, d!);
+}
+
+function expandRangesToDateSet(ranges: { start: string; end: string }[]): Set<string> {
+  const dates = new Set<string>();
+  for (const r of ranges) {
+    if (!r.start || !r.end) continue;
+    try {
+      const cur = parseDateStr(r.start);
+      const end = parseDateStr(r.end);
+      while (cur <= end) {
+        const y = cur.getFullYear();
+        const m = String(cur.getMonth() + 1).padStart(2, "0");
+        const d = String(cur.getDate()).padStart(2, "0");
+        dates.add(`${y}-${m}-${d}`);
+        cur.setDate(cur.getDate() + 1);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return dates;
+}
+
+function hasBookedNightInRange(startStr: string, endStr: string, disabledSet: Set<string>): boolean {
+  if (!startStr || !endStr || disabledSet.size === 0) return false;
+  try {
+    const cur = parseDateStr(startStr);
+    const end = parseDateStr(endStr);
+    while (cur < end) {
+      const y = cur.getFullYear();
+      const m = String(cur.getMonth() + 1).padStart(2, "0");
+      const d = String(cur.getDate()).padStart(2, "0");
+      if (disabledSet.has(`${y}-${m}-${d}`)) return true;
+      cur.setDate(cur.getDate() + 1);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
 
 // Accent-insensitive matching: strips diacritics so "makepe" matches "Maképé".
 function normalizeText(value: string): string {
@@ -331,6 +398,22 @@ export default function TravellerDashboard() {
 
   // Availability check state
   const [availabilityStatus, setAvailabilityStatus] = useState<"checking" | "available" | "unavailable" | null>(null);
+  const [roomTypeAvailabilities, setRoomTypeAvailabilities] = useState<{
+    roomTypeId: string;
+    roomType: string;
+    name: string;
+    unitCount: number;
+    unavailableRanges: { start: string; end: string }[];
+  }[]>([]);
+  const [generalUnavailableRanges, setGeneralUnavailableRanges] = useState<{ start: string; end: string }[]>([]);
+  const [autoOpenDetailCalendar, setAutoOpenDetailCalendar] = useState(false);
+  const [roomTypeConflictModal, setRoomTypeConflictModal] = useState<{
+    isOpen: boolean;
+    currentRtName: string;
+    targetRtId: string;
+    targetRtName: string;
+    conflictDates: string;
+  } | null>(null);
 
   // Voucher state
   const [voucherCode, setVoucherCode] = useState<string>("");
@@ -537,6 +620,10 @@ export default function TravellerDashboard() {
   const [featuredCategory, setFeaturedCategory] = useState<"hotel" | "apartment" | "car">("hotel");
   const [loadingFeatured, setLoadingFeatured] = useState(false);
   const featuredLoadedRef = useRef(false);
+
+  // Dynamic curated destinations on home tab (from real listings in visitor's region)
+  const [curatedDestinations, setCuratedDestinations] = useState<DynamicCuratedDestination[]>([]);
+  const curatedLoadedRef = useRef(false);
 
   // Quick-result dropdown when user taps Hotels / Apartments / Car Rentals in hero form
   const [quickResults, setQuickResults] = useState<PublicListingDetail[]>([]);
@@ -777,6 +864,142 @@ export default function TravellerDashboard() {
     }
   }
 
+  // Dynamically load top curated destinations from real listings around the visitor's location
+  async function loadCuratedDestinations() {
+    try {
+      const origin = await getSearchOrigin();
+      // Fetch accommodations (hotels & apartments) nearest to visitor's origin
+      const [hotelRes, aptRes] = await Promise.allSettled([
+        listingApi.get<any>("/search", {
+          params: { category: "hotel", limit: 50, lat: origin.lat, lng: origin.lng },
+        }),
+        listingApi.get<any>("/search", {
+          params: { category: "apartment", limit: 50, lat: origin.lat, lng: origin.lng },
+        }),
+      ]);
+
+      const rawHotels = hotelRes.status === "fulfilled" ? (hotelRes.value.data?.data?.results ?? hotelRes.value.data?.data ?? []) : [];
+      const rawApts = aptRes.status === "fulfilled" ? (aptRes.value.data?.data?.results ?? aptRes.value.data?.data ?? []) : [];
+      const allRaw = [
+        ...(Array.isArray(rawHotels) ? rawHotels : []),
+        ...(Array.isArray(rawApts) ? rawApts : []),
+      ];
+
+      if (allRaw.length === 0) {
+        setCuratedDestinations([]);
+        return;
+      }
+
+      // Determine visitor's continent/region
+      const userTz = typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "";
+      const isAfricanUser = userTz.startsWith("Africa/");
+      const continentPrefix = userTz.includes("/") ? userTz.split("/")[0] + "/" : "";
+
+      // Group listings by destination (town + country)
+      const groups = new Map<string, {
+        town: string;
+        country: string;
+        countryCode: string;
+        count: number;
+        img: string;
+        categoryCounts: { hotel: number; apartment: number; car: number };
+        minDistance: number;
+      }>();
+
+      for (const item of allRaw) {
+        const mapped = mapSearchResult(item);
+        const town = (mapped.town || "").trim();
+        const rawCountry = (mapped.country || "").trim();
+        const countryCode = rawCountry.toUpperCase();
+        const countryName = formatCountryName(rawCountry);
+
+        // Skip listings without location info
+        if (!town && !countryName) continue;
+
+        // Regional filter:
+        // 1. If visitor is in Africa, only show African destinations
+        // 2. If visitor is outside Africa, only show destinations in their continent or within regional proximity (<3500km)
+        const countryData = getCountry(countryCode);
+        const listingIsAfrica =
+          countryData?.timezones?.some((t) => t.startsWith("Africa/")) ??
+          (countryCode === "KE" || countryCode === "TZ" || countryCode === "UG" || countryCode === "RW" || countryCode === "NG" || countryCode === "ZA");
+
+        if (isAfricanUser && !listingIsAfrica) {
+          continue; // User is in Africa, omit non-African listings
+        }
+        if (!isAfricanUser) {
+          const listingInUserContinent = continentPrefix && countryData?.timezones?.some((t) => t.startsWith(continentPrefix));
+          const isNearby = mapped.distanceKm != null && mapped.distanceKm < 3500;
+          if (!listingInUserContinent && !isNearby) {
+            continue; // Listing is not in user's region
+          }
+        }
+
+        const photo = mapped.primaryPhotoUrl || mapped.primaryPhotoThumbUrl || mapped.photos?.[0]?.cdnUrl || "";
+        const key = `${town.toLowerCase()}__${countryCode.toLowerCase()}`;
+        const cat = (mapped.category === "apartment" || mapped.category === "car") ? mapped.category : "hotel";
+        const dist = mapped.distanceKm ?? 999999;
+
+        const existing = groups.get(key);
+        if (existing) {
+          existing.count += 1;
+          existing.categoryCounts[cat] = (existing.categoryCounts[cat] || 0) + 1;
+          if (!existing.img && photo) existing.img = photo;
+          if (dist < existing.minDistance) existing.minDistance = dist;
+        } else {
+          groups.set(key, {
+            town,
+            country: countryName,
+            countryCode,
+            count: 1,
+            img: photo,
+            categoryCounts: { hotel: cat === "hotel" ? 1 : 0, apartment: cat === "apartment" ? 1 : 0, car: 0 },
+            minDistance: dist,
+          });
+        }
+      }
+
+      // Filter only destinations that have a real image
+      const candidates: DynamicCuratedDestination[] = [];
+      for (const [key, g] of groups.entries()) {
+        if (!g.img) continue; // Real photo required to advertise
+        const displayName = g.town && g.country ? `${g.town}, ${g.country}` : (g.town || g.country);
+        const primaryCat = g.categoryCounts.apartment > g.categoryCounts.hotel ? "apartment" : "hotel";
+        candidates.push({
+          key,
+          town: g.town,
+          country: g.country,
+          displayName,
+          count: g.count,
+          img: g.img,
+          primaryCategory: primaryCat,
+          minDistance: g.minDistance,
+        });
+      }
+
+      // Sort destinations: closest to user first; tiebreak by property count
+      candidates.sort((a, b) => {
+        if (Math.abs(a.minDistance - b.minDistance) > 100) {
+          return a.minDistance - b.minDistance;
+        }
+        return b.count - a.count;
+      });
+
+      setCuratedDestinations(candidates.slice(0, 3));
+    } catch (err) {
+      console.error("Failed to load curated destinations:", err);
+      setCuratedDestinations([]);
+    }
+  }
+
+  function handleSelectCuratedDestination(dest: DynamicCuratedDestination) {
+    const targetCategory = dest.primaryCategory || searchCategory || "hotel";
+    const searchTerm = dest.town || dest.displayName;
+    setSearchCategory(targetCategory);
+    setSearchDestination(searchTerm);
+    handleSearch(undefined, targetCategory, searchTerm);
+  }
+
   // Re-fetch whatever's currently on screen when the display currency changes.
   // listingApi's request interceptor already attaches the new `currency` param
   // to every call; these are plain axios calls (not react-query), so nothing
@@ -831,16 +1054,77 @@ export default function TravellerDashboard() {
     if (selectedListingId && !lockToken) handleSelectListing(selectedListingId);
   }, [currency]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Disabled dates for DateRangePicker in listing detail based on room type / listing availability
+  const detailDisabledDates = React.useMemo(() => {
+    if (!detailListing) return new Set<string>();
+
+    if (detailListing.category === "hotel") {
+      if (selectedRoomTypeId) {
+        const rt = roomTypeAvailabilities.find((r) => r.roomTypeId === selectedRoomTypeId);
+        return expandRangesToDateSet(rt?.unavailableRanges ?? []);
+      }
+      if (roomTypeAvailabilities.length > 0) {
+        const allSets = roomTypeAvailabilities.map((rt) => expandRangesToDateSet(rt.unavailableRanges));
+        const intersection = new Set<string>();
+        const first = allSets[0];
+        if (first) {
+          for (const date of first) {
+            if (allSets.every((s) => s.has(date))) {
+              intersection.add(date);
+            }
+          }
+        }
+        return intersection;
+      }
+      return new Set<string>();
+    }
+
+    return expandRangesToDateSet(generalUnavailableRanges);
+  }, [detailListing, selectedRoomTypeId, roomTypeAvailabilities, generalUnavailableRanges]);
+
+  function handleRoomTypeChange(newRtId: string | null) {
+    if (!newRtId) {
+      setSelectedRoomTypeId(null);
+      return;
+    }
+
+    const start = detailCheckIn;
+    const end = detailCheckOut;
+
+    if (start && end && detailListing?.category === "hotel") {
+      const targetRt = (detailListing.roomTypes ?? []).find((rt) => rt.id === newRtId);
+      const currentRt = (detailListing.roomTypes ?? []).find((rt) => rt.id === selectedRoomTypeId);
+
+      const targetRtAvail = roomTypeAvailabilities.find((r) => r.roomTypeId === newRtId);
+      const targetDisabledSet = expandRangesToDateSet(targetRtAvail?.unavailableRanges ?? []);
+
+      const hasConflict = hasBookedNightInRange(start, end, targetDisabledSet);
+      if (hasConflict) {
+        setRoomTypeConflictModal({
+          isOpen: true,
+          currentRtName: currentRt?.name || "current room",
+          targetRtId: newRtId,
+          targetRtName: targetRt?.name || "selected room",
+          conflictDates: `${fmtDisplayDate(start)} – ${fmtDisplayDate(end)}`,
+        });
+        return;
+      }
+    }
+
+    setSelectedRoomTypeId(newRtId);
+  }
+
   // Fetch wallet vouchers for the personal banner as soon as the user is authenticated
   useEffect(() => {
     if (hasAuthToken) fetchWalletVouchers();
   }, [hasAuthToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load featured hotel listings once when home tab is first shown
+  // Load featured hotel listings and dynamic curated destinations once when home tab is first shown
   useEffect(() => {
     if (activeTab === "home" && !featuredLoadedRef.current) {
       featuredLoadedRef.current = true;
       loadFeaturedListings("hotel");
+      loadCuratedDestinations();
     }
   }, [activeTab]);
 
@@ -1366,6 +1650,27 @@ export default function TravellerDashboard() {
         };
         setDetailListing(details);
 
+        // Fetch full listing availability for calendar date disabling across next 12 months
+        listingApi
+          .get<any>(`/listings/${id}/availability`, {
+            params: {
+              start: getTodayString(),
+              end: (() => {
+                const d = new Date();
+                d.setFullYear(d.getFullYear() + 1);
+                return d.toISOString().slice(0, 10);
+              })(),
+            },
+          })
+          .then((res) => {
+            if (res.data?.success) {
+              const d = res.data.data ?? {};
+              setRoomTypeAvailabilities(d.roomTypeAvailability ?? []);
+              setGeneralUnavailableRanges(d.unavailableRanges ?? []);
+            }
+          })
+          .catch(() => {});
+
         let cheapestRtId: string | null = null;
         if (details.category === "hotel" && details.roomTypes && details.roomTypes.length > 0) {
           const activeRts = details.roomTypes.filter((rt) => rt.isActive !== false);
@@ -1389,6 +1694,9 @@ export default function TravellerDashboard() {
         fetchAllPricing();
       } else {
         setDetailListing(null);
+        setRoomTypeAvailabilities([]);
+        setGeneralUnavailableRanges([]);
+        setRoomTypeConflictModal(null);
       }
     } catch (err: any) {
       const code = err?.response?.data?.error?.code;
@@ -1400,6 +1708,9 @@ export default function TravellerDashboard() {
         return;
       }
       setDetailListing(null);
+      setRoomTypeAvailabilities([]);
+      setGeneralUnavailableRanges([]);
+      setRoomTypeConflictModal(null);
     } finally {
       setLoadingDetail(false);
     }
@@ -2559,6 +2870,7 @@ export default function TravellerDashboard() {
                                     setDetailReturnDate(end);
                                   }}
                                   minDate={getTodayString()}
+                                  disabledDates={detailDisabledDates}
                                 />
                               ) : (
                                 <>
@@ -2569,8 +2881,14 @@ export default function TravellerDashboard() {
                                     onChange={(start, end) => {
                                       setDetailCheckIn(start);
                                       setDetailCheckOut(end);
+                                      setAutoOpenDetailCalendar(false);
                                     }}
                                     minDate={getTodayString()}
+                                    disabledDates={detailDisabledDates}
+                                    forceOpen={autoOpenDetailCalendar}
+                                    onOpenChange={(open) => {
+                                      if (!open) setAutoOpenDetailCalendar(false);
+                                    }}
                                   />
                                   <div className="border border-slate-200 rounded-xl p-3 bg-slate-50">
                                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Guests</p>
@@ -2627,7 +2945,7 @@ export default function TravellerDashboard() {
                                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Room Type</p>
                                 <select
                                   value={selectedRoomTypeId || ""}
-                                  onChange={(e) => setSelectedRoomTypeId(e.target.value || null)}
+                                  onChange={(e) => handleRoomTypeChange(e.target.value || null)}
                                   className="w-full mt-1 text-sm bg-transparent outline-none font-semibold text-slate-800"
                                 >
                                   {detailListing.roomTypes
@@ -3405,66 +3723,9 @@ export default function TravellerDashboard() {
                         onResolved={setSelectedSearchPlace}
                         label="Where to?"
                         placeholder="Destination or listing name"
-                        className="px-5 py-3 md:border-r border-slate-200"
+                        variant="searchBar"
+                        className="px-5 py-4 md:border-r border-slate-200"
                       />
-                      {false && <div className="hidden">
-                        <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Where to?</p>
-                          <input
-                            type="text"
-                            required
-                            placeholder="Destination"
-                            value={searchDestination}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSearchDestination(val);
-                              setShowSuggestions(true);
-                              if (nominatimTimer.current) clearTimeout(nominatimTimer.current);
-                              if (val.length >= 2) {
-                                nominatimTimer.current = setTimeout(async () => {
-                                  try {
-                                    const r = await fetch(
-                                      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(val)}&format=json&limit=5&addressdetails=0`,
-                                      { headers: { "Accept-Language": "en", "User-Agent": "Kainook/1.0" } }
-                                    );
-                                    const data = await r.json();
-                                    setNominatimResults(Array.isArray(data) ? data : []);
-                                  } catch { setNominatimResults([]); }
-                                }, 320);
-                              } else {
-                                setNominatimResults([]);
-                              }
-                            }}
-                            onFocus={() => setShowSuggestions(true)}
-                            onBlur={() => setTimeout(() => { setShowSuggestions(false); setNominatimResults([]); }, 220)}
-                            className="w-full bg-transparent border-none outline-none text-sm font-semibold text-slate-800 placeholder-slate-400"
-                          />
-                        </div>
-                      </div>}
-                      {/* Legacy autocomplete disabled; Google Places is authoritative. */}
-                      {false && showSuggestions && (nominatimResults.length > 0 || apiSuggestions.filter(s => s.toLowerCase().includes(searchDestination.toLowerCase())).length > 0) && (
-                        <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200/80 rounded-2xl shadow-2xl z-50 overflow-hidden max-h-56 overflow-y-auto">
-                          {nominatimResults.length > 0 ? nominatimResults.map((r, i) => (
-                            <button key={i} type="button"
-                              onMouseDown={() => { setSearchDestination(r.display_name.split(",").slice(0, 2).join(",").trim()); setShowSuggestions(false); setNominatimResults([]); }}
-                              className="w-full px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-[#0c2614] hover:text-white transition-colors text-left flex items-center gap-2"
-                            >
-                              <svg className="w-3.5 h-3.5 shrink-0 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                              <span className="truncate">{r.display_name.split(",").slice(0, 3).join(", ")}</span>
-                            </button>
-                          )) : apiSuggestions.filter(s => s.toLowerCase().includes(searchDestination.toLowerCase())).map((s, i) => (
-                            <button key={i} type="button" onMouseDown={() => { setSearchDestination(s); setShowSuggestions(false); }}
-                              className="w-full px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-[#0c2614] hover:text-white transition-colors text-left flex items-center gap-2">
-                              <svg className="w-3.5 h-3.5 shrink-0 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                              <span className="truncate">{s}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
                     </div>
 
                     {/* Date fields */}
@@ -3585,68 +3846,106 @@ export default function TravellerDashboard() {
               </div>
             </div>
 
-            {/* ── CURATED WORLDS ── */}
-            <section className="max-w-7xl mx-auto px-4 sm:px-6 py-16">
-              <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-10">
-                <div>
-                  <p className="text-[10px] font-semibold text-[#1D8D2B] uppercase tracking-[0.3em] mb-2">Curated Worlds</p>
-                  <h2 className="text-3xl md:text-4xl font-serif text-slate-900 leading-snug">
-                    Discover Destinations Selected for the<br className="hidden sm:block" /> Discerning Traveler.
-                  </h2>
-                </div>
-                {/* <button
-                  onClick={() => handleSearch(undefined, "hotel")}
-                  className="text-sm font-semibold text-[#0c2614] hover:text-[#1D8D2B] transition underline underline-offset-4 shrink-0"
-                >
-                  View All Destinations
-                </button> */}
-              </div>
-
-              {/* Asymmetric grid: 1 large left + 2 stacked right */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Large left */}
-                <button
-                  type="button"
-                  onClick={() => { setSearchDestination("Amalfi Coast, Italy"); handleSearch(undefined, "hotel", "Amalfi Coast, Italy"); }}
-                  className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300"
-                  style={{ minHeight: "420px" }}
-                >
-                  <img
-                    src="https://images.unsplash.com/photo-1533104816931-20fa691ff6ca?w=900&q=85"
-                    alt="Amalfi Coast, Italy"
-                    className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
-                  <div className="absolute bottom-0 left-0 p-6 text-left">
-                    <p className="text-white font-serif text-2xl font-light leading-snug">Amalfi Coast, Italy</p>
-                    <p className="text-white/65 text-xs font-medium mt-1 tracking-wide">120+ Exclusive Properties</p>
+            {/* ── CURATED WORLDS (Dynamic from real listings in visitor's region) ── */}
+            {curatedDestinations.length > 0 && (
+              <section className="max-w-7xl mx-auto px-4 sm:px-6 py-16">
+                <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-10">
+                  <div>
+                    <p className="text-[10px] font-semibold text-[#1D8D2B] uppercase tracking-[0.3em] mb-2">Curated Worlds</p>
+                    <h2 className="text-3xl md:text-4xl font-serif text-slate-900 leading-snug">
+                      Discover Destinations Selected for the<br className="hidden sm:block" /> Discerning Traveler.
+                    </h2>
                   </div>
-                </button>
-
-                {/* Right column — 2 stacked */}
-                <div className="grid grid-rows-2 gap-4">
-                  {[
-                    { name: "Kyoto", country: "Japan", img: "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=600&q=85", props: "80+" },
-                    { name: "Santorini", country: "Greece", img: "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=85", props: "95+" },
-                  ].map((dest) => (
-                    <button
-                      key={dest.name}
-                      type="button"
-                      onClick={() => { setSearchDestination(`${dest.name}, ${dest.country}`); handleSearch(undefined, "hotel", `${dest.name}, ${dest.country}`); }}
-                      className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300"
-                      style={{ minHeight: "198px" }}
-                    >
-                      <img src={dest.img} alt={`${dest.name}, ${dest.country}`} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700" />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
-                      <div className="absolute bottom-0 left-0 p-5 text-left">
-                        <p className="text-white font-serif text-xl font-light">{dest.name}, {dest.country}</p>
-                        <p className="text-white/65 text-xs font-medium mt-0.5 tracking-wide">{dest.props} Exclusive Properties</p>
-                      </div>
-                    </button>
-                  ))}
                 </div>
-              </div>
-            </section>
+
+                {curatedDestinations.length >= 3 && curatedDestinations[0] ? (
+                  /* Asymmetric grid: 1 large left + 2 stacked right */
+                  (() => {
+                    const primary = curatedDestinations[0]!;
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Large left */}
+                        <button
+                          type="button"
+                          onClick={() => handleSelectCuratedDestination(primary)}
+                          className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300 text-left"
+                          style={{ minHeight: "420px" }}
+                        >
+                          <img
+                            src={primary.img}
+                            alt={primary.displayName}
+                            className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+                          <div className="absolute bottom-0 left-0 p-6 text-left">
+                            <p className="text-white font-serif text-2xl font-light leading-snug">
+                              {primary.displayName}
+                            </p>
+                            <p className="text-white/75 text-xs font-medium mt-1 tracking-wide">
+                              {primary.count === 1
+                                ? "1 Exclusive Property"
+                                : `${primary.count}+ Exclusive Properties`}
+                            </p>
+                          </div>
+                        </button>
+
+                        {/* Right column — 2 stacked */}
+                        <div className="grid grid-rows-2 gap-4">
+                          {curatedDestinations.slice(1, 3).map((dest) => (
+                            <button
+                              key={dest.key}
+                              type="button"
+                              onClick={() => handleSelectCuratedDestination(dest)}
+                              className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300 text-left"
+                              style={{ minHeight: "198px" }}
+                            >
+                              <img
+                                src={dest.img}
+                                alt={dest.displayName}
+                                className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                              />
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+                              <div className="absolute bottom-0 left-0 p-5 text-left">
+                                <p className="text-white font-serif text-xl font-light">{dest.displayName}</p>
+                                <p className="text-white/75 text-xs font-medium mt-0.5 tracking-wide">
+                                  {dest.count === 1 ? "1 Exclusive Property" : `${dest.count}+ Exclusive Properties`}
+                                </p>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  /* Responsive grid for 1 or 2 destinations */
+                  <div className={`grid grid-cols-1 ${curatedDestinations.length === 2 ? "md:grid-cols-2" : ""} gap-4`}>
+                    {curatedDestinations.map((dest) => (
+                      <button
+                        key={dest.key}
+                        type="button"
+                        onClick={() => handleSelectCuratedDestination(dest)}
+                        className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300 text-left"
+                        style={{ minHeight: "320px" }}
+                      >
+                        <img
+                          src={dest.img}
+                          alt={dest.displayName}
+                          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+                        <div className="absolute bottom-0 left-0 p-6 text-left">
+                          <p className="text-white font-serif text-2xl font-light leading-snug">{dest.displayName}</p>
+                          <p className="text-white/75 text-xs font-medium mt-1 tracking-wide">
+                            {dest.count === 1 ? "1 Exclusive Property" : `${dest.count}+ Exclusive Properties`}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             {/* ── STAY IN EXCELLENCE ── */}
             <section className="bg-[#f7f6f3] py-16 border-y border-slate-200/60">
@@ -4890,6 +5189,54 @@ export default function TravellerDashboard() {
               >
                 Sign In
               </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Room Type Availability Conflict Modal ── */}
+      {roomTypeConflictModal?.isOpen && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 text-left border border-slate-100 animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mb-4">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-bold text-slate-900 font-serif">
+              {roomTypeConflictModal.targetRtName} Unavailable
+            </h3>
+            <p className="text-sm text-slate-600 mt-2 leading-relaxed">
+              The <strong className="text-slate-900">{roomTypeConflictModal.targetRtName}</strong> is fully booked for your selected dates (<span className="font-semibold text-slate-800">{roomTypeConflictModal.conflictDates}</span>).
+            </p>
+            <p className="text-xs text-slate-500 mt-2">
+              Would you like to switch to <strong className="text-slate-700">{roomTypeConflictModal.targetRtName}</strong> and choose different dates, or keep your dates with <strong className="text-slate-700">{roomTypeConflictModal.currentRtName}</strong>?
+            </p>
+
+            <div className="mt-6 flex flex-col sm:flex-row gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  const targetId = roomTypeConflictModal.targetRtId;
+                  setRoomTypeConflictModal(null);
+                  setSelectedRoomTypeId(targetId);
+                  setDetailCheckIn("");
+                  setDetailCheckOut("");
+                  setAutoOpenDetailCalendar(true);
+                }}
+                className="flex-1 py-3 px-4 rounded-xl bg-[#0c2614] hover:bg-[#1D8D2B] text-white text-xs font-bold transition shadow-md hover:shadow-lg text-center cursor-pointer"
+              >
+                Choose New Dates
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRoomTypeConflictModal(null);
+                }}
+                className="flex-1 py-3 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold transition text-center cursor-pointer"
+              >
+                Keep Current Dates
+              </button>
             </div>
           </div>
         </div>

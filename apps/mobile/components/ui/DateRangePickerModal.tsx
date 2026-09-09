@@ -44,22 +44,57 @@ function calToStr(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+function parseDateStr(str: string): Date {
+  const [y, m, d] = str.split("-").map(Number);
+  return new Date(y!, m! - 1, d!);
+}
+
+export function expandRangesToDateSet(ranges?: { start: string; end: string }[]): Set<string> {
+  const set = new Set<string>();
+  if (!ranges || ranges.length === 0) return set;
+  for (const r of ranges) {
+    if (!r.start || !r.end) continue;
+    try {
+      const s = r.start.split("T")[0]!;
+      const e = r.end.split("T")[0]!;
+      const [sy, sm, sd] = s.split("-").map(Number);
+      const [ey, em, ed] = e.split("-").map(Number);
+      const cur = new Date(sy!, sm! - 1, sd!);
+      const last = new Date(ey!, em! - 1, ed!);
+      while (cur <= last) {
+        set.add(calToStr(cur));
+        cur.setDate(cur.getDate() + 1);
+      }
+    } catch {
+      // ignore malformed date
+    }
+  }
+  return set;
+}
+
+export function hasBookedNightInRange(
+  startStr: string,
+  endStr: string,
+  disabledSet: Set<string>
+): boolean {
+  if (!startStr || !endStr || disabledSet.size === 0) return false;
+  try {
+    const cur = parseDateStr(startStr);
+    const end = parseDateStr(endStr);
+    while (cur < end) {
+      if (disabledSet.has(calToStr(cur))) return true;
+      cur.setDate(cur.getDate() + 1);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 function isBeforeToday(d: Date): boolean {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return d.getTime() < today.getTime();
-}
-
-function isInUnavailable(
-  ds: string,
-  ranges?: { start: string; end: string }[]
-): boolean {
-  if (!ranges || ranges.length === 0) return false;
-  return ranges.some((r) => {
-    const s = r.start.split("T")[0]!;
-    const e = r.end.split("T")[0]!;
-    return ds >= s && ds <= e;
-  });
 }
 
 function buildMonthGrid(year: number, month: number): (Date | null)[] {
@@ -98,6 +133,7 @@ export interface DateRangePickerModalProps {
   title?: string;
   isCar?: boolean;
   unavailableRanges?: { start: string; end: string }[];
+  disabledDates?: Set<string> | string[];
 }
 
 export default function DateRangePickerModal({
@@ -109,7 +145,24 @@ export default function DateRangePickerModal({
   title,
   isCar = false,
   unavailableRanges = [],
+  disabledDates,
 }: DateRangePickerModalProps) {
+  const disabledSet = React.useMemo(() => {
+    const set = new Set<string>();
+    if (disabledDates) {
+      if (disabledDates instanceof Set) {
+        disabledDates.forEach((d) => set.add(d));
+      } else {
+        disabledDates.forEach((d) => set.add(d));
+      }
+    }
+    if (unavailableRanges && unavailableRanges.length > 0) {
+      const fromRanges = expandRangesToDateSet(unavailableRanges);
+      fromRanges.forEach((d) => set.add(d));
+    }
+    return set;
+  }, [disabledDates, unavailableRanges]);
+
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth());
@@ -169,12 +222,17 @@ export default function DateRangePickerModal({
   function handleDayPress(d: Date) {
     const ds = calToStr(d);
     if (!selStart || (selStart && selEnd)) {
+      if (isBeforeToday(d) || disabledSet.has(ds)) return;
       setSelStart(ds);
       setSelEnd(null);
     } else if (ds <= selStart) {
+      if (isBeforeToday(d) || disabledSet.has(ds)) return;
       setSelStart(ds);
       setSelEnd(null);
     } else {
+      if (hasBookedNightInRange(selStart, ds, disabledSet)) {
+        return;
+      }
       setSelEnd(ds);
       // Completing the range is the confirmation — no separate Apply step.
       // Car rentals are the exception: pickup and return times are chosen in
@@ -189,7 +247,26 @@ export default function DateRangePickerModal({
   type DayState = "start" | "end" | "range" | "normal" | "disabled";
   function getDayState(d: Date): DayState {
     const ds = calToStr(d);
-    if (isBeforeToday(d) || isInUnavailable(ds, unavailableRanges)) return "disabled";
+    const isPast = isBeforeToday(d);
+    const isBooked = disabledSet.has(ds);
+
+    let isDisabled = false;
+    if (isPast) {
+      isDisabled = true;
+    } else if (!selStart || (selStart && selEnd)) {
+      isDisabled = isBooked;
+    } else {
+      // selStart is set, picking checkout
+      if (ds < selStart) {
+        isDisabled = isBooked;
+      } else if (ds === selStart) {
+        isDisabled = true; // min 1 night
+      } else {
+        isDisabled = hasBookedNightInRange(selStart, ds, disabledSet);
+      }
+    }
+
+    if (isDisabled) return "disabled";
     if (ds === selStart) return "start";
     if (ds === selEnd) return "end";
     if (selStart && selEnd && ds > selStart && ds < selEnd) return "range";
@@ -266,11 +343,16 @@ export default function DateRangePickerModal({
           <View style={{ flexDirection: "row", flexWrap: "wrap", paddingHorizontal: 16 }}>
             {monthDays.map((d, i) => {
               if (!d) return <View key={`e${i}`} style={{ width: DAY_SIZE, height: 44 }} />;
+              const ds = calToStr(d);
               const st = getDayState(d);
               const isStart = st === "start";
               const isEnd = st === "end";
               const isRange = st === "range";
               const isDisabled = st === "disabled";
+              const isPast = isBeforeToday(d);
+              const isBooked = disabledSet.has(ds);
+              const isCrossBlocked = selStart && !selEnd && hasBookedNightInRange(selStart, ds, disabledSet);
+              const showStrikethrough = isBooked || isCrossBlocked;
 
               return (
                 <View
@@ -293,7 +375,12 @@ export default function DateRangePickerModal({
                       width: 34,
                       height: 34,
                       borderRadius: 17,
-                      backgroundColor: isStart || isEnd ? GREEN : "transparent",
+                      backgroundColor:
+                        isStart || isEnd
+                          ? GREEN
+                          : showStrikethrough && !isPast
+                            ? "#F3F4F6"
+                            : "transparent",
                       alignItems: "center",
                       justifyContent: "center",
                     }}
@@ -303,10 +390,13 @@ export default function DateRangePickerModal({
                         fontSize: 14,
                         fontWeight: isStart || isEnd ? "700" : "400",
                         color: isDisabled
-                          ? "#D1D5DB"
+                          ? showStrikethrough
+                            ? "#9CA3AF"
+                            : "#D1D5DB"
                           : isStart || isEnd
                             ? "#fff"
                             : TEXT,
+                        textDecorationLine: showStrikethrough ? "line-through" : "none",
                       }}
                     >
                       {d.getDate()}
@@ -339,6 +429,11 @@ export default function DateRangePickerModal({
                     : ""}
                 </Text>
               </View>
+            )}
+            {disabledSet.size > 0 && (
+              <Text style={{ fontSize: 11, color: MUTED, textAlign: "center", marginTop: 8 }}>
+                Dates with strikethrough are fully booked
+              </Text>
             )}
           </View>
 

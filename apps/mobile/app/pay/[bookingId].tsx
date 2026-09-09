@@ -22,6 +22,7 @@ import { useStripe } from "@stripe/stripe-react-native";
 import * as SecureStore from "expo-secure-store";
 import { listingApi } from "../../lib/listing-api";
 import { paymentApi } from "../../lib/payment-api";
+import { useAuthStore } from "../../store/auth";
 import { LOYALTY_QK } from "../../hooks/loyalty";
 import { initializeStripe, resolveStripePublishableKey } from "../../lib/stripe-config";
 import { clearPaymentLogs, formatLogsForSharing, payLog } from "../../lib/payment-logger";
@@ -290,10 +291,13 @@ export default function PaymentScreen() {
   const [taraXafAmount, setTaraXafAmount] = useState<number | null>(null);
   const [taraXafLoading, setTaraXafLoading] = useState(false);
 
-  // ── Tara countdown ────────────────────────────────────────────────────────
-  const [taraCountdownMs, setTaraCountdownMs] = useState(90_000);
+  // ── Tara countdown & status check ─────────────────────────────────────────
+  const [taraCountdownMs, setTaraCountdownMs] = useState(120_000);
   const taraIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const taraDeadlineRef = useRef<number>(0);
+  const taraPaymentIdRef = useRef<string | null>(null);
+  const inFlightCheckRef = useRef<Promise<boolean> | null>(null);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
   // ── Polling refs ──────────────────────────────────────────────────────────
   const stripePollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -480,6 +484,24 @@ export default function PaymentScreen() {
     return unsubscribe;
   }, [navigation, isProcessing]);
 
+  // ── Re-check payment status & resync countdown on app resume from background ──
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        if (view === "tara_waiting" || view === "stripe_polling") {
+          // Re-sync countdown timer with actual wall-clock time
+          if (taraDeadlineRef.current > 0) {
+            const remaining = taraDeadlineRef.current - Date.now();
+            setTaraCountdownMs(Math.max(0, remaining));
+          }
+          // Immediately poll for confirmation upon returning to the app
+          void checkPaymentStatusNow(false);
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [view]);
+
   async function handleTryRebook() {
     if (!booking) return;
     setReBookingLoading(true);
@@ -651,38 +673,53 @@ export default function PaymentScreen() {
     });
   }
 
-  // ── Tara polling ──────────────────────────────────────────────────────────
-  function startTaraPolling(paymentId: string, maxDurationMs = 90_000) {
-    taraPollingActiveRef.current = true;
-    const INTERVAL = 5_000;
-    const MAX_DURATION = maxDurationMs;
-    const startTime = Date.now();
+  // ── Immediate status check (used by polling, AppState resume, and manual button) ──
+  async function checkPaymentStatusNow(isManual = false): Promise<boolean> {
+    const paymentId = view === "tara_waiting"
+      ? (taraPaymentIdRef.current ?? capturedPaymentIdRef.current)
+      : (activeStripePaymentIdRef.current ?? capturedPaymentIdRef.current);
 
-    async function poll() {
-      if (!taraPollingActiveRef.current) return;
+    if (!paymentId || paymentSucceededRef.current) return false;
+
+    // Deduplicate concurrent calls: if a check is already in-flight, await the same promise
+    if (inFlightCheckRef.current) {
+      if (isManual) setIsCheckingStatus(true);
       try {
-        const statusRes = await paymentApi.get<PaymentStatusResponse>(`/payments/${paymentId}/status`);
-        const status = statusRes.data.data.status;
-        payLog("info", "TARA-POLL", `status: ${status}`, { paymentId });
+        return await inFlightCheckRef.current;
+      } finally {
+        if (isManual) setIsCheckingStatus(false);
+      }
+    }
 
-        if (status === "captured") {
-          payLog("success", "TARA-POLL", "Status CAPTURED — navigating to success");
+    if (isManual) setIsCheckingStatus(true);
+
+    const executeCheck = async (): Promise<boolean> => {
+      try {
+        payLog("info", "TARA-STATUS-CHECK", `Checking status for paymentId: ${paymentId}`);
+        const statusRes = await paymentApi.get<any>(`/payments/${paymentId}/status`);
+        const status = statusRes.data?.data?.status ?? statusRes.data?.status;
+        payLog("info", "TARA-STATUS-CHECK", `Status response: ${status}`);
+
+        if (paymentSucceededRef.current) return true;
+
+        if (status === "captured" || status === "succeeded") {
+          payLog("success", "TARA-STATUS-CHECK", "Status CAPTURED — navigating to success");
           clearPolling();
-          // Save mobile number for future payments if user opted in (non-critical)
           if (saveMobileNumber && mobileNumber && !selectedSavedMethodId) {
             try {
               await paymentApi.post("/guests/me/payment-methods/tara", {
                 mobileNumber: `${countryPrefix}${mobileNumber}`,
               });
             } catch {
-              // Ignore — successful payment should not block on save failure
+              // Ignore non-critical save failure
             }
           }
           navigateToSuccess();
-          return;
+          return true;
         }
+
         if (status === "failed" || status === "timed_out") {
-          payLog("error", "TARA-POLL", `Status ${status} — payment failed`);
+          payLog("error", "TARA-STATUS-CHECK", `Status ${status} — payment failed`);
           clearPolling();
           setFailureReason(
             status === "timed_out"
@@ -690,24 +727,81 @@ export default function PaymentScreen() {
               : "Mobile money payment failed. Please try again."
           );
           setView("failure");
-          return;
+          return false;
+        }
+
+        // Also verify if the booking itself has been confirmed by webhook (if user authenticated)
+        const hasAuthToken = !!useAuthStore.getState().accessToken;
+        if (bookingId && hasAuthToken) {
+          try {
+            const bookingRes = await listingApi.get<{ data: BookingDetail }>(`/guests/me/bookings/${bookingId}`);
+            const bStatus = bookingRes.data?.data?.status;
+            if (bStatus === "confirmed" || bStatus === "paid" || bStatus === "completed") {
+              if (paymentSucceededRef.current) return true;
+              payLog("success", "TARA-STATUS-CHECK", `Booking confirmed (${bStatus}) — navigating to success`);
+              clearPolling();
+              navigateToSuccess();
+              return true;
+            }
+          } catch {
+            // Ignore transient error on fallback booking check
+          }
+        }
+
+        if (isManual) {
+          Alert.alert(
+            "Payment Processing",
+            "We haven't received mobile network confirmation yet. If you just entered your PIN, please wait a few seconds and tap again."
+          );
         }
       } catch (pollErr: any) {
-        if (!taraPollingActiveRef.current) return;
         const httpStatus = pollErr?.response?.status;
-        payLog("error", "TARA-POLL", `Poll error HTTP ${httpStatus ?? "network"}`, { httpStatus });
+        payLog("error", "TARA-STATUS-CHECK", `Status check error HTTP ${httpStatus ?? "network"}`);
         if (httpStatus === 404 || httpStatus === 401 || httpStatus === 403) {
           clearPolling();
           setFailureReason("Payment session not found. Please try again.");
           setView("failure");
-          return;
+          return false;
         }
-        // 5xx / network errors: schedule next poll
+        if (isManual) {
+          Alert.alert("Connection Notice", "Unable to check payment status right now. Please verify your internet connection.");
+        }
+      } finally {
+        if (isManual) setIsCheckingStatus(false);
       }
+      return false;
+    };
 
+    const promise = executeCheck();
+    inFlightCheckRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      inFlightCheckRef.current = null;
+    }
+  }
+
+  // ── Tara polling ──────────────────────────────────────────────────────────
+  function startTaraPolling(paymentId: string, maxDurationMs = 120_000) {
+    taraPollingActiveRef.current = true;
+    taraPaymentIdRef.current = paymentId;
+    capturedPaymentIdRef.current = paymentId;
+    const INTERVAL = 3_000;
+    const MAX_DURATION = maxDurationMs;
+    const startTime = Date.now();
+
+    async function poll() {
       if (!taraPollingActiveRef.current) return;
+
+      const isDone = await checkPaymentStatusNow(false);
+      if (isDone || !taraPollingActiveRef.current) return;
+
       if (Date.now() - startTime >= MAX_DURATION) {
-        payLog("warn", "TARA-POLL", "90 s timeout — showing failure");
+        // Run one final verification check before showing failure
+        const finalCheck = await checkPaymentStatusNow(false);
+        if (finalCheck || !taraPollingActiveRef.current) return;
+
+        payLog("warn", "TARA-POLL", "Timeout reached — showing failure");
         clearPolling();
         setFailureReason("Mobile money confirmation timed out. Please try again.");
         setView("failure");
@@ -715,30 +809,19 @@ export default function PaymentScreen() {
       }
 
       taraPollingRef.current = setTimeout(() => {
-        poll().catch(() => {
-          if (taraPollingActiveRef.current) {
-            clearPolling();
-            setFailureReason("Mobile money confirmation failed. Please try again.");
-            setView("failure");
-          }
-        });
+        poll().catch(() => {});
       }, INTERVAL);
     }
 
-    poll().catch(() => {
-      if (taraPollingActiveRef.current) {
-        clearPolling();
-        setFailureReason("Mobile money confirmation failed. Please try again.");
-        setView("failure");
-      }
-    });
+    poll().catch(() => {});
   }
 
   // ── Tara countdown ────────────────────────────────────────────────────────
-  function startTaraCountdown() {
-    taraDeadlineRef.current = Date.now() + 90_000;
-    setTaraCountdownMs(90_000);
+  function startTaraCountdown(durationMs = 120_000) {
+    taraDeadlineRef.current = Date.now() + durationMs;
+    setTaraCountdownMs(durationMs);
 
+    if (taraIntervalRef.current) clearInterval(taraIntervalRef.current);
     taraIntervalRef.current = setInterval(() => {
       const remaining = taraDeadlineRef.current - Date.now();
       if (remaining <= 0) {
@@ -771,7 +854,9 @@ export default function PaymentScreen() {
 
   // ── Navigate to success ───────────────────────────────────────────────────
   function navigateToSuccess() {
+    if (paymentSucceededRef.current) return;
     paymentSucceededRef.current = true;
+    clearPolling();
     activeStripePaymentIdRef.current = null;
     stripeSessionRef.current = null;
     void queryClient.invalidateQueries({ queryKey: ["booking", bookingId] });
@@ -1009,8 +1094,8 @@ export default function PaymentScreen() {
         startTaraPolling(paymentId, 10 * 60_000);
       } else {
         setView("tara_waiting");
-        startTaraCountdown();
-        startTaraPolling(paymentId);
+        startTaraCountdown(120_000);
+        startTaraPolling(paymentId, 120_000);
       }
     } catch (err: any) {
       payLog("error", "HANDLE-PAY", "Tara initiate FAILED", {
@@ -1053,6 +1138,11 @@ export default function PaymentScreen() {
 
   function handleCancel() {
     fireStripePaymentCancel();
+    const taraPmId = taraPaymentIdRef.current;
+    if (taraPmId && !paymentSucceededRef.current) {
+      paymentApi.post(`/payments/${taraPmId}/cancel`).catch(() => {});
+    }
+    taraPaymentIdRef.current = null;
     clearPolling();
     router.back();
   }
@@ -1125,6 +1215,20 @@ export default function PaymentScreen() {
               </TouchableOpacity>
             ) : null}
             <ActivityIndicator size="small" color="#16a34a" style={{ marginTop: 16 }} />
+            <TouchableOpacity
+              style={[styles.confirmPaymentBtn, isCheckingStatus && { opacity: 0.7 }]}
+              onPress={() => void checkPaymentStatusNow(true)}
+              disabled={isCheckingStatus}
+            >
+              {isCheckingStatus ? (
+                <View style={styles.btnLoadingRow}>
+                  <ActivityIndicator size="small" color="#fff" style={{ marginRight: 8 }} />
+                  <Text style={styles.confirmPaymentBtnText}>Checking Status...</Text>
+                </View>
+              ) : (
+                <Text style={styles.confirmPaymentBtnText}>I've Completed Payment</Text>
+              )}
+            </TouchableOpacity>
             <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel}>
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
@@ -1154,6 +1258,20 @@ export default function PaymentScreen() {
             <Text style={styles.countdownValue}>{msToCountdown(taraCountdownMs)}</Text>
           </View>
           <ActivityIndicator size="small" color="#16a34a" style={{ marginTop: 8 }} />
+          <TouchableOpacity
+            style={[styles.confirmPaymentBtn, isCheckingStatus && { opacity: 0.7 }]}
+            onPress={() => void checkPaymentStatusNow(true)}
+            disabled={isCheckingStatus}
+          >
+            {isCheckingStatus ? (
+              <View style={styles.btnLoadingRow}>
+                <ActivityIndicator size="small" color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.confirmPaymentBtnText}>Checking Status...</Text>
+              </View>
+            ) : (
+              <Text style={styles.confirmPaymentBtnText}>I've Approved the Payment</Text>
+            )}
+          </TouchableOpacity>
           <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel}>
             <Text style={styles.cancelBtnText}>Cancel</Text>
           </TouchableOpacity>
@@ -1874,7 +1992,7 @@ const styles = StyleSheet.create({
   secondaryBtnText: { color: "#374151", fontWeight: "600", fontSize: 15 },
   btnLoadingRow: { flexDirection: "row", alignItems: "center" },
   cancelBtn: {
-    marginTop: 24,
+    marginTop: 12,
     paddingVertical: 12,
     paddingHorizontal: 32,
     borderWidth: 1,
@@ -1882,6 +2000,19 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   cancelBtnText: { fontSize: 15, color: "#374151", fontWeight: "600" },
+  confirmPaymentBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#16a34a",
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 12,
+    marginTop: 16,
+    width: "100%",
+    maxWidth: 280,
+  },
+  confirmPaymentBtnText: { fontSize: 15, color: "#fff", fontWeight: "700" },
   waveLinkBtn: {
     flexDirection: "row",
     alignItems: "center",

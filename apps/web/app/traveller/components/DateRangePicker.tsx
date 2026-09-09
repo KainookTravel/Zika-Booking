@@ -32,7 +32,32 @@ function calToStr(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-function fmtDisplayDate(dateStr: string): string {
+function parseDateStr(str: string): Date {
+  const [y, m, d] = str.split("-").map(Number);
+  return new Date(y!, m! - 1, d!);
+}
+
+/**
+ * Returns true if any night between startStr and endStr (i.e. startStr <= night < endStr)
+ * is present in disabledSet.
+ */
+function hasBookedNightInRange(startStr: string, endStr: string, disabledSet: Set<string>): boolean {
+  if (!startStr || !endStr || disabledSet.size === 0) return false;
+  try {
+    const cur = parseDateStr(startStr);
+    const end = parseDateStr(endStr);
+    while (cur < end) {
+      const ds = calToStr(cur);
+      if (disabledSet.has(ds)) return true;
+      cur.setDate(cur.getDate() + 1);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+export function fmtDisplayDate(dateStr: string): string {
   if (!dateStr) return "";
   try {
     const [y, m, d] = dateStr.split("-").map(Number);
@@ -81,6 +106,9 @@ interface DateRangePickerProps {
   minDate?: string;
   className?: string;
   variant?: "default" | "searchBar" | "minimal";
+  disabledDates?: Set<string> | string[];
+  forceOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 export default function DateRangePicker({
@@ -93,9 +121,18 @@ export default function DateRangePicker({
   minDate = getTodayString(),
   className = "",
   variant = "default",
+  disabledDates,
+  forceOpen,
+  onOpenChange,
 }: DateRangePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const disabledSet = React.useMemo(() => {
+    if (!disabledDates) return new Set<string>();
+    if (disabledDates instanceof Set) return disabledDates;
+    return new Set(disabledDates);
+  }, [disabledDates]);
 
   const today = new Date();
   const [viewYear, setViewYear] = useState(today.getFullYear());
@@ -115,6 +152,16 @@ export default function DateRangePicker({
       }
     }
   }, [startDate, endDate]);
+
+  useEffect(() => {
+    if (forceOpen) {
+      setIsOpen(true);
+    }
+  }, [forceOpen]);
+
+  useEffect(() => {
+    onOpenChange?.(isOpen);
+  }, [isOpen, onOpenChange]);
 
   // Close dropdown on click outside or Escape
   useEffect(() => {
@@ -154,16 +201,22 @@ export default function DateRangePicker({
 
   function handleDayClick(d: Date) {
     const ds = calToStr(d);
+    // If selecting check-in date
     if (!selStart || (selStart && selEnd)) {
+      if (ds < minDate || disabledSet.has(ds)) return;
       setSelStart(ds);
       setSelEnd("");
     } else if (ds <= selStart) {
+      // Re-selecting check-in with an earlier or same date
+      if (ds < minDate || disabledSet.has(ds)) return;
       setSelStart(ds);
       setSelEnd("");
     } else {
+      // Selecting checkout date: cannot checkout across a booked night
+      if (hasBookedNightInRange(selStart, ds, disabledSet)) {
+        return;
+      }
       setSelEnd(ds);
-      // Completing the range *is* the confirmation — commit and close rather
-      // than making the guest press a separate Apply.
       onChange(selStart, ds);
       setIsOpen(false);
     }
@@ -318,14 +371,36 @@ export default function DateRangePicker({
               if (!d) return <div key={`empty-${idx}`} className="h-9" />;
 
               const ds = calToStr(d);
-              const isDisabled = ds < minDate;
+              const isPast = ds < minDate;
+              const isBooked = disabledSet.has(ds);
+
+              let isDisabled = false;
+              if (isPast) {
+                isDisabled = true;
+              } else if (!selStart || (selStart && selEnd)) {
+                isDisabled = isBooked;
+              } else {
+                // selStart is set, picking check-out
+                if (ds < selStart) {
+                  isDisabled = isBooked;
+                } else if (ds === selStart) {
+                  isDisabled = true; // Minimum 1 night stay
+                } else {
+                  isDisabled = hasBookedNightInRange(selStart, ds, disabledSet);
+                }
+              }
+
               const isStart = ds === selStart;
               const isEnd = ds === selEnd;
               const isInRange = selStart && selEnd && ds > selStart && ds < selEnd;
 
               let cellStyle = "hover:bg-slate-100 text-slate-700 font-medium";
               if (isDisabled) {
-                cellStyle = "text-slate-300 cursor-not-allowed";
+                if (isBooked || (!isPast && selStart && hasBookedNightInRange(selStart, ds, disabledSet))) {
+                  cellStyle = "text-slate-300 line-through cursor-not-allowed bg-slate-50/50";
+                } else {
+                  cellStyle = "text-slate-300 cursor-not-allowed";
+                }
               } else if (isStart || isEnd) {
                 cellStyle = "bg-[#0c2614] text-white font-bold rounded-xl shadow-md";
               } else if (isInRange) {
@@ -338,6 +413,7 @@ export default function DateRangePicker({
                   type="button"
                   disabled={isDisabled}
                   onClick={() => handleDayClick(d)}
+                  title={isBooked ? "Date unavailable" : undefined}
                   className={`h-9 flex items-center justify-center text-xs transition-all ${cellStyle}`}
                 >
                   {d.getDate()}
