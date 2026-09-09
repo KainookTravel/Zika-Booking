@@ -34,6 +34,7 @@ interface Props {
   biasLocation?: { lat: number; lng: number } | null;
   disabled?: boolean;
   className?: string;
+  variant?: "default" | "searchBar";
 }
 
 const DEBOUNCE_MS = 250;
@@ -58,6 +59,7 @@ export function PlaceAutocomplete({
   biasLocation,
   disabled,
   className,
+  variant = "default",
 }: Props) {
   const inputId = useId();
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -217,6 +219,84 @@ export function PlaceAutocomplete({
   };
 
   const configured = isGoogleMapsConfigured();
+
+  if (variant === "searchBar") {
+    return (
+      <div ref={wrapRef} className={cn("relative flex items-center gap-2.5", className)}>
+        <span className="pointer-events-none text-slate-400 shrink-0">
+          <Search className="w-4 h-4" />
+        </span>
+        <div className="flex-1 min-w-0">
+          {label && (
+            <label
+              htmlFor={inputId}
+              className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5 cursor-pointer"
+            >
+              {label}
+            </label>
+          )}
+          <div className="relative">
+            <input
+              id={inputId}
+              type="text"
+              value={value}
+              disabled={disabled || !configured}
+              placeholder={configured ? placeholder : "Map search unavailable"}
+              onChange={(e) => handleChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={() => suggestions.length > 0 && setOpen(true)}
+              autoComplete="off"
+              className={cn(
+                "w-full bg-transparent border-0 p-0 text-sm font-semibold text-slate-800",
+                "placeholder:text-slate-400 placeholder:font-normal focus:outline-none focus:ring-0",
+                (disabled || !configured) && "text-slate-400"
+              )}
+            />
+            {loading && (
+              <span className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-400">
+                <Loader2 className="w-4 h-4 animate-spin" />
+              </span>
+            )}
+          </div>
+        </div>
+
+        {open && suggestions.length > 0 && (
+          <ul
+            role="listbox"
+            className="absolute top-full left-0 mt-3 w-full sm:min-w-[360px] z-50 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-2xl"
+          >
+            {suggestions.map((s, i) => (
+              <li key={s.placeId}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={i === activeIndex}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  onClick={() => void handleSelect(s)}
+                  className={cn(
+                    "flex w-full items-start gap-2.5 px-4 py-2.5 text-left transition-colors",
+                    i === activeIndex ? "bg-slate-50" : "bg-white"
+                  )}
+                >
+                  <MapPin className="mt-0.5 w-4 h-4 shrink-0 text-[#4c6a48]" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-slate-800">
+                      {s.primary}
+                    </span>
+                    {s.secondary && (
+                      <span className="block truncate text-xs text-slate-500">
+                        {s.secondary}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div ref={wrapRef} className={cn("relative", className)}>

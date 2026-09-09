@@ -3569,66 +3569,9 @@ export default function TravellerDashboard() {
                         onResolved={setSelectedSearchPlace}
                         label="Where to?"
                         placeholder="Destination or listing name"
-                        className="px-5 py-3 md:border-r border-slate-200"
+                        variant="searchBar"
+                        className="px-5 py-4 md:border-r border-slate-200"
                       />
-                      {false && <div className="hidden">
-                        <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Where to?</p>
-                          <input
-                            type="text"
-                            required
-                            placeholder="Destination"
-                            value={searchDestination}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSearchDestination(val);
-                              setShowSuggestions(true);
-                              if (nominatimTimer.current) clearTimeout(nominatimTimer.current);
-                              if (val.length >= 2) {
-                                nominatimTimer.current = setTimeout(async () => {
-                                  try {
-                                    const r = await fetch(
-                                      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(val)}&format=json&limit=5&addressdetails=0`,
-                                      { headers: { "Accept-Language": "en", "User-Agent": "Kainook/1.0" } }
-                                    );
-                                    const data = await r.json();
-                                    setNominatimResults(Array.isArray(data) ? data : []);
-                                  } catch { setNominatimResults([]); }
-                                }, 320);
-                              } else {
-                                setNominatimResults([]);
-                              }
-                            }}
-                            onFocus={() => setShowSuggestions(true)}
-                            onBlur={() => setTimeout(() => { setShowSuggestions(false); setNominatimResults([]); }, 220)}
-                            className="w-full bg-transparent border-none outline-none text-sm font-semibold text-slate-800 placeholder-slate-400"
-                          />
-                        </div>
-                      </div>}
-                      {/* Legacy autocomplete disabled; Google Places is authoritative. */}
-                      {false && showSuggestions && (nominatimResults.length > 0 || apiSuggestions.filter(s => s.toLowerCase().includes(searchDestination.toLowerCase())).length > 0) && (
-                        <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200/80 rounded-2xl shadow-2xl z-50 overflow-hidden max-h-56 overflow-y-auto">
-                          {nominatimResults.length > 0 ? nominatimResults.map((r, i) => (
-                            <button key={i} type="button"
-                              onMouseDown={() => { setSearchDestination(r.display_name.split(",").slice(0, 2).join(",").trim()); setShowSuggestions(false); setNominatimResults([]); }}
-                              className="w-full px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-[#0c2614] hover:text-white transition-colors text-left flex items-center gap-2"
-                            >
-                              <svg className="w-3.5 h-3.5 shrink-0 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                              <span className="truncate">{r.display_name.split(",").slice(0, 3).join(", ")}</span>
-                            </button>
-                          )) : apiSuggestions.filter(s => s.toLowerCase().includes(searchDestination.toLowerCase())).map((s, i) => (
-                            <button key={i} type="button" onMouseDown={() => { setSearchDestination(s); setShowSuggestions(false); }}
-                              className="w-full px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-[#0c2614] hover:text-white transition-colors text-left flex items-center gap-2">
-                              <svg className="w-3.5 h-3.5 shrink-0 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                              <span className="truncate">{s}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
                     </div>
 
                     {/* Date fields */}
