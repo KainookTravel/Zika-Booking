@@ -8,7 +8,6 @@ import { ALL_COUNTRIES } from "@/lib/countries";
 import {
   AlertCircle,
   ArrowLeft,
-  Building,
   CheckCircle2,
   CreditCard,
   ExternalLink,
@@ -316,7 +315,8 @@ export function PaymentSettingsForm({ showBackButton = false }: { showBackButton
   }
 
   function hydrateForm(next: MerchantProfile) {
-    setPayoutMethod(next.payoutMethod ?? "manual");
+    const initialMethod = next.payoutMethod === "bank_transfer" ? "manual" : (next.payoutMethod ?? "manual");
+    setPayoutMethod(initialMethod);
     setBankName(next.bankName ?? "");
     setBankAccountNumber(next.bankAccountNumber ?? "");
     setBankAccountName(next.bankAccountName ?? "");
@@ -607,11 +607,9 @@ export function PaymentSettingsForm({ showBackButton = false }: { showBackButton
               title={
                 payoutMethod === "stripe_connect"
                   ? "Stripe Connect Integration"
-                  : payoutMethod === "bank_transfer"
-                    ? "Bank Account Information"
-                    : payoutMethod === "mobile_money"
-                      ? "Mobile Money Configuration"
-                      : "Manual Payout Setup"
+                  : payoutMethod === "mobile_money"
+                    ? "Mobile Money Configuration"
+                    : "Manual Payout Setup"
               }
               subtitle="Select your preferred payout method and fill in the required account details."
             />
@@ -636,10 +634,9 @@ export function PaymentSettingsForm({ showBackButton = false }: { showBackButton
 
               <Card className="border border-slate-100 bg-slate-50/60" padding="sm">
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Payout Method Selection</p>
-                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-2 sm:grid-cols-3">
                   {([
                     { value: "stripe_connect", label: "Stripe Connect", sub: "Direct payouts to Stripe", Icon: CreditCard },
-                    { value: "bank_transfer", label: "Bank Transfer", sub: "Direct bank settlement", Icon: Building },
                     { value: "mobile_money", label: "Mobile Money", sub: "Mobile wallet payouts", Icon: Phone },
                     { value: "manual", label: "Manual", sub: "Manual settlement", Icon: Wallet },
                   ] as const).map(({ value, label, sub, Icon }) => (
@@ -730,47 +727,6 @@ export function PaymentSettingsForm({ showBackButton = false }: { showBackButton
                         Check Stripe Status
                       </Button>
                     )}
-                  </div>
-                </div>
-              )}
-
-              {payoutMethod === "bank_transfer" && (
-                <div className="space-y-4">
-                  <SectionNotice
-                    title="Bank Transfer"
-                    message="The stored bank account number is masked for security. Re-enter it if you need to update your details."
-                  />
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="sm:col-span-2">
-                      <Input
-                        label="Account Holder Name"
-                        placeholder="Jane Doe"
-                        required
-                        value={bankAccountName}
-                        onChange={(event) => setBankAccountName(event.target.value)}
-                        leftIcon={<User />}
-                      />
-                    </div>
-                    <Input
-                      label="Bank Name"
-                      placeholder="Standard Chartered / Chase / Barclays"
-                      required
-                      value={bankName}
-                      onChange={(event) => setBankName(event.target.value)}
-                      leftIcon={<Building />}
-                    />
-                    <div className="sm:col-span-2">
-                      <Input
-                        label="Account Number / IBAN"
-                        placeholder="Enter or update your account number"
-                        type="password"
-                        autoComplete="off"
-                        required
-                        value={bankAccountNumber}
-                        onChange={(event) => setBankAccountNumber(event.target.value)}
-                        hint="Stored securely on your merchant profile."
-                      />
-                    </div>
                   </div>
                 </div>
               )}
