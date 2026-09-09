@@ -15,9 +15,10 @@ import Constants from "expo-constants";
  * one key to rotate rather than two that can drift apart.
  */
 export const GOOGLE_MAPS_API_KEY: string =
+  (process.env["EXPO_PUBLIC_GOOGLE_MAPS_API_KEY"] as string | undefined) ||
   (Constants.expoConfig?.extra as Record<string, string> | undefined)
-    ?.["googleMapsApiKey"] ??
-  (Constants.expoConfig?.android?.config?.googleMaps?.apiKey as string | undefined) ??
+    ?.["googleMapsApiKey"] ||
+  (Constants.expoConfig?.android?.config?.googleMaps?.apiKey as string | undefined) ||
   "";
 
 export const isGoogleMapsConfigured = () => GOOGLE_MAPS_API_KEY.length > 0;

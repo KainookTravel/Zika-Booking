@@ -118,6 +118,36 @@ export function SectionHeader({
 
 // ── InfoBanner ────────────────────────────────────────────────────────────────
 
+import { getCurrencyForCountry } from "./_web-parity";
+
+// ── PayoutCurrencyWarning ───────────────────────────────────────────────────
+
+export function PayoutCurrencyWarning({
+  providerCountry,
+  listingCountry,
+  currency,
+}: {
+  providerCountry: string | null | undefined;
+  listingCountry: string;
+  currency: string;
+}) {
+  if (!providerCountry || !currency) return null;
+  const providerCurrency = getCurrencyForCountry(providerCountry);
+  if (!providerCurrency || providerCurrency === currency) return null;
+
+  return (
+    <View style={fs.payoutWarning}>
+      <Feather name="alert-triangle" size={16} color="#B45309" style={{ marginTop: 1 }} />
+      <View style={{ flex: 1 }}>
+        <Text style={fs.payoutWarningTitle}>Payout Currency Notice</Text>
+        <Text style={fs.payoutWarningText}>
+          Your account is registered in <Text style={{ fontWeight: "700" }}>{providerCountry}</Text> ({providerCurrency ?? "—"}). This listing is in <Text style={{ fontWeight: "700" }}>{currency}</Text>. Make sure you have a payout method configured for {currency} to receive payouts.
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 export function InfoBanner({ message, variant = "info" }: { message: string; variant?: "info" | "warning" | "success" }) {
   const colors = {
     info: { bg: "#EFF6FF", border: "#BFDBFE", text: "#1D4ED8", icon: "info" as const },
@@ -376,11 +406,11 @@ export function CountryPickerModal({
   const [search, setSearch] = useState("");
   const filtered = search.trim()
     ? ALL_COUNTRIES.filter(
-        (c) =>
-          c.name.toLowerCase().includes(search.toLowerCase()) ||
-          c.code.toLowerCase().includes(search.toLowerCase()) ||
-          c.currency.toLowerCase().includes(search.toLowerCase())
-      )
+      (c) =>
+        c.name.toLowerCase().includes(search.toLowerCase()) ||
+        c.code.toLowerCase().includes(search.toLowerCase()) ||
+        c.currency.toLowerCase().includes(search.toLowerCase())
+    )
     : ALL_COUNTRIES;
 
   return (
@@ -848,19 +878,23 @@ export function WizardHeader({
 export function WizardFooter({
   onNext,
   onBack,
+  onSaveDraft,
   isFirst,
   isLast,
   lastLabel,
   loading,
+  saveDraftLoading,
   disabled,
   disabledHint,
 }: {
   onNext: () => void;
   onBack: () => void;
+  onSaveDraft?: () => void;
   isFirst: boolean;
   isLast: boolean;
   lastLabel?: string;
   loading?: boolean;
+  saveDraftLoading?: boolean;
   disabled?: boolean;
   disabledHint?: string;
 }) {
@@ -879,8 +913,25 @@ export function WizardFooter({
             <Text style={fs.footerBackText}>Back</Text>
           </TouchableOpacity>
         )}
+        {onSaveDraft && (
+          <TouchableOpacity
+            style={fs.footerDraftBtn}
+            onPress={onSaveDraft}
+            disabled={saveDraftLoading || loading}
+            activeOpacity={0.8}
+          >
+            {saveDraftLoading ? (
+              <ActivityIndicator color={K.colors.darkGreen} size="small" />
+            ) : (
+              <>
+                <Feather name="save" size={15} color={K.colors.darkGreen} />
+                <Text style={fs.footerDraftText}>Save Draft</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
-          style={[fs.footerNextBtn, (loading || disabled) && fs.footerNextBtnDisabled, isFirst && { flex: 1 }]}
+          style={[fs.footerNextBtn, (loading || disabled) && fs.footerNextBtnDisabled, (isFirst && !onSaveDraft) && { flex: 1 }]}
           onPress={onNext}
           disabled={loading || disabled}
           activeOpacity={0.85}
@@ -892,8 +943,6 @@ export function WizardFooter({
               <Text style={fs.footerNextText}>
                 {isLast ? (lastLabel ?? "Submit") : "Save & Continue"}
               </Text>
-              {!isLast && <Feather name="arrow-right" size={16} color="#fff" />}
-              {isLast && <Feather name="send" size={16} color="#fff" />}
             </View>
           )}
         </TouchableOpacity>
@@ -905,6 +954,30 @@ export function WizardFooter({
 // ── Shared styles ─────────────────────────────────────────────────────────────
 
 export const fs = StyleSheet.create({
+  // Payout warning banner
+  payoutWarning: {
+    flexDirection: "row",
+    gap: 10,
+    backgroundColor: "#FFFBEB",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    borderRadius: K.radius.lg,
+    padding: 14,
+    marginBottom: 16,
+    alignItems: "flex-start",
+  },
+  payoutWarningTitle: {
+    fontSize: K.font.sm,
+    fontWeight: "700",
+    color: "#92400E",
+    marginBottom: 2,
+  },
+  payoutWarningText: {
+    fontSize: K.font.xs,
+    color: "#78350F",
+    lineHeight: 17,
+  },
+
   // groups
   group: { marginBottom: 22 },
   sectionHeader: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: 20 },
@@ -1401,6 +1474,18 @@ export const fs = StyleSheet.create({
     paddingHorizontal: 16,
   },
   footerBackText: { fontSize: K.font.sm, fontWeight: "600", color: K.colors.textMuted },
+  footerDraftBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1.5,
+    borderColor: K.colors.darkGreen + "40",
+    backgroundColor: K.colors.bgTint,
+    borderRadius: K.radius.lg,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+  },
+  footerDraftText: { fontSize: K.font.sm, fontWeight: "700", color: K.colors.darkGreen },
   footerNextBtn: {
     flex: 2,
     backgroundColor: K.colors.accent,

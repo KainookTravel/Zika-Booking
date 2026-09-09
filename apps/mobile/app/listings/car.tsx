@@ -10,6 +10,7 @@ import {
   Platform,
   BackHandler,
   Keyboard,
+  TouchableOpacity,
 } from "react-native";
 import { useLocalSearchParams, router } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -21,6 +22,7 @@ import {
   FormField,
   SectionHeader,
   InfoBanner,
+  PayoutCurrencyWarning,
   SwitchRow,
   SelectField,
   CountryPickerButton,
@@ -32,6 +34,7 @@ import {
 } from "./_components";
 import { LocationPicker } from "../../components/maps/LocationPicker";
 import { useListingMedia } from "./_media";
+import { useAuthStore } from "../../store/auth";
 import {
   CANCELLATION_POLICIES,
   toNullableNumber,
@@ -39,6 +42,7 @@ import {
   trimOrNull,
   countryOrNull,
   apiErrorMessage,
+  getCurrencyForCountry,
 } from "./_web-parity";
 
 /**
@@ -124,8 +128,8 @@ const STEPS = [
 const STEP_HINTS = [
   "Basic info & pickup location",
   "Features",
-  "Pricing",
-  "Uploads",
+  "Pricing & terms",
+  "Photos (min 3 required) & documents",
 ] as const;
 
 const currentYear = new Date().getFullYear();
@@ -215,51 +219,51 @@ function normalizeDriveType(v: unknown): string {
 
 function initState(l: any): CarState {
   return {
-    name: l.name ?? "",
-    description: l.description ?? "",
-    carMake: l.carMake ?? "",
-    carModel: l.carModel ?? "",
-    carYear: l.carYear ? String(l.carYear) : String(currentYear),
-    carCategory: normalizeSelectValue(l.carCategory, CAR_CATEGORY_VALUES, "Economy"),
-    licencePlate: l.licencePlate ?? "",
-    odometerReading: l.odometerReading != null ? String(l.odometerReading) : "",
-    unitCount: l.unitCount ? String(l.unitCount) : "1",
-    colour: l.colour ?? "",
-    engineSize: l.engineSize ?? "",
-    minimumRentalDays: l.minimumRentalDays != null ? String(l.minimumRentalDays) : "1",
-    address: l.address ?? "",
-    lat: toNullableNumber(l.lat),
-    lng: toNullableNumber(l.lng),
-    town: l.town ?? "",
-    neighborhood: l.neighborhood ?? "",
-    country: l.country ?? "",
-    transmission: normalizeTransmission(l.transmission),
-    fuelType: normalizeFuelType(l.fuelType),
-    driveType: normalizeDriveType(l.driveType),
-    seats: l.seats ? String(l.seats) : "5",
-    doors: l.doors ? String(l.doors) : "4",
-    airConditioning: l.airConditioning ?? true,
-    pricePerDay: l.pricePerDay ? String(l.pricePerDay) : "",
-    currency: l.currency ?? "USD",
-    pickupHoursFrom: l.pickupHoursFrom ?? "",
-    pickupHoursTo: l.pickupHoursTo ?? "",
-    cancellationPolicy: normalizeSelectValue(l.cancellationPolicy, CANCELLATION_POLICY_VALUES, "flexible"),
-    mileagePolicy: normalizeSelectValue(l.mileagePolicy, MILEAGE_POLICY_VALUES, "unlimited"),
-    mileageLimitKm: l.mileageLimitKm != null ? String(l.mileageLimitKm) : "",
-    extraKmRate: l.extraKmRate != null ? String(l.extraKmRate) : "",
-    fuelPolicy: normalizeSelectValue(l.fuelPolicy, FUEL_POLICY_VALUES, "full_to_full"),
-    insuranceType: normalizeSelectValue(l.insuranceType, INSURANCE_TYPE_VALUES, "standard"),
-    minimumDriverAge: l.minimumDriverAge != null ? String(l.minimumDriverAge) : "21",
-    securityDeposit: l.securityDeposit != null ? String(l.securityDeposit) : "",
-    deliveryEnabled: l.deliveryEnabled ?? false,
-    deliveryRadiusKm: l.deliveryRadiusKm != null ? String(l.deliveryRadiusKm) : "",
-    deliveryFee: l.deliveryFee != null ? String(l.deliveryFee) : "",
-    allowPreBooking: l.allowPreBooking ?? false,
-    roadsideAssistance: l.roadsideAssistance ?? false,
-    crossBorderAllowed: l.crossBorderAllowed ?? false,
-    driverProvided: l.driverProvided ?? false,
-    airportPickup: l.airportPickup ?? false,
-    returnSameLocation: l.returnSameLocation ?? true,
+    name: l?.name ?? "",
+    description: l?.description ?? "",
+    carMake: l?.carMake ?? "",
+    carModel: l?.carModel ?? "",
+    carYear: l?.carYear ? String(l.carYear) : String(currentYear),
+    carCategory: normalizeSelectValue(l?.carCategory, CAR_CATEGORY_VALUES, "Economy"),
+    licencePlate: l?.licencePlate ?? "",
+    odometerReading: l?.odometerReading != null ? String(l.odometerReading) : "",
+    unitCount: l?.unitCount ? String(l.unitCount) : "1",
+    colour: l?.colour ?? "",
+    engineSize: l?.engineSize ?? "",
+    minimumRentalDays: l?.minimumRentalDays != null ? String(l.minimumRentalDays) : "1",
+    address: l?.address ?? "",
+    lat: toNullableNumber(l?.lat),
+    lng: toNullableNumber(l?.lng),
+    town: l?.town ?? "",
+    neighborhood: l?.neighborhood ?? "",
+    country: l?.country ?? "",
+    transmission: normalizeTransmission(l?.transmission),
+    fuelType: normalizeFuelType(l?.fuelType),
+    driveType: normalizeDriveType(l?.driveType),
+    seats: l?.seats ? String(l.seats) : "5",
+    doors: l?.doors ? String(l.doors) : "4",
+    airConditioning: l?.airConditioning ?? true,
+    pricePerDay: l?.pricePerDay ? String(l.pricePerDay) : "",
+    currency: l?.currency ?? "USD",
+    pickupHoursFrom: l?.pickupHoursFrom ?? "",
+    pickupHoursTo: l?.pickupHoursTo ?? "",
+    cancellationPolicy: normalizeSelectValue(l?.cancellationPolicy, CANCELLATION_POLICY_VALUES, "flexible"),
+    mileagePolicy: normalizeSelectValue(l?.mileagePolicy, MILEAGE_POLICY_VALUES, "unlimited"),
+    mileageLimitKm: l?.mileageLimitKm != null ? String(l.mileageLimitKm) : "",
+    extraKmRate: l?.extraKmRate != null ? String(l.extraKmRate) : "",
+    fuelPolicy: normalizeSelectValue(l?.fuelPolicy, FUEL_POLICY_VALUES, "full_to_full"),
+    insuranceType: normalizeSelectValue(l?.insuranceType, INSURANCE_TYPE_VALUES, "standard"),
+    minimumDriverAge: l?.minimumDriverAge != null ? String(l.minimumDriverAge) : "21",
+    securityDeposit: l?.securityDeposit != null ? String(l.securityDeposit) : "",
+    deliveryEnabled: l?.deliveryEnabled ?? false,
+    deliveryRadiusKm: l?.deliveryRadiusKm != null ? String(l.deliveryRadiusKm) : "",
+    deliveryFee: l?.deliveryFee != null ? String(l.deliveryFee) : "",
+    allowPreBooking: l?.allowPreBooking ?? false,
+    roadsideAssistance: l?.roadsideAssistance ?? false,
+    crossBorderAllowed: l?.crossBorderAllowed ?? false,
+    driverProvided: l?.driverProvided ?? false,
+    airportPickup: l?.airportPickup ?? false,
+    returnSameLocation: l?.returnSameLocation ?? true,
   };
 }
 
@@ -355,12 +359,16 @@ function buildPayload(s: CarState): Record<string, unknown> {
 // ── Screen ──────────────────────────────────────────────────────────────────
 
 export default function CarWizard() {
-  const { id } = useLocalSearchParams<{ id?: string }>();
-  const listingId = String(id ?? "");
+  const params = useLocalSearchParams<{ id?: string }>();
+  const rawId = params.id;
+  const listingId = (Array.isArray(rawId) ? rawId[0] : rawId) ?? "";
+
   const qc = useQueryClient();
+  const providerCountry = useAuthStore((st) => st.user?.country);
 
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [countryModalOpen, setCountryModalOpen] = useState(false);
   const [selectedCountry, setSelectedCountry] = useState<CountryData | null>(null);
@@ -370,7 +378,7 @@ export default function CarWizard() {
 
   const media = useListingMedia(listingId);
 
-  const { data: listing, isLoading } = useQuery({
+  const { data: listing, isLoading, isError } = useQuery({
     queryKey: ["listing", listingId],
     queryFn: async () => {
       const res = await listingApi.get<{ data: any }>(`/listings/${listingId}`);
@@ -378,6 +386,8 @@ export default function CarWizard() {
     },
     enabled: !!listingId,
   });
+
+  const status = listing?.status ?? "draft";
 
   // Hydrate once per listing load; re-hydrating on every refetch would wipe
   // unsaved edits mid-wizard.
@@ -422,6 +432,10 @@ export default function CarWizard() {
   function selectCountry(c: CountryData) {
     setSelectedCountry(c);
     set("country", c.code);
+    const detectedCurrency = getCurrencyForCountry(c.code);
+    if (detectedCurrency) {
+      set("currency", detectedCurrency);
+    }
   }
 
   // ── Validation — port of web validateStep ─────────────────────────────────
@@ -464,7 +478,7 @@ export default function CarWizard() {
           e.pickupHoursFrom = "Pickup hours must be valid and end after start.";
         break;
       case 3: // Media & Documents
-        if (media.photos.length < 1) e.photos = "At least 1 photo is required.";
+        if (media.photos.length < 3) e.photos = "At least 3 photos are required to activate your listing.";
         break;
     }
     setErrors(e);
@@ -483,6 +497,16 @@ export default function CarWizard() {
     }
   }
 
+  async function handleSaveDraft() {
+    setSavingDraft(true);
+    const ok = await saveAll();
+    setSavingDraft(false);
+    if (ok) {
+      qc.invalidateQueries({ queryKey: ["myListings"] });
+      Alert.alert("Draft Saved", "Your listing progress has been saved.");
+    }
+  }
+
   async function handleNext() {
     if (!validateStep(step)) return;
     setSaving(true);
@@ -495,17 +519,34 @@ export default function CarWizard() {
     if (!validateStep(step)) return;
     setSaving(true);
     const ok = await saveAll();
-    setSaving(false);
-    if (!ok) return;
-    qc.invalidateQueries({ queryKey: ["myListings"] });
-    Alert.alert(
-      "Car Listing Saved",
-      "Your listing has been saved. Review the requirements and activate it whenever you are ready.",
-      [
-        { text: "Later", onPress: () => router.replace("/(provider)/listings" as any) },
-        { text: "Review & Activate", onPress: () => router.replace(`/listings/${listingId}/submit` as any) },
-      ]
-    );
+    if (!ok) {
+      setSaving(false);
+      return;
+    }
+
+    if (["draft", "deactivated"].includes(status)) {
+      try {
+        const res = await listingApi.post(`/listings/${listingId}/activate`);
+        setSaving(false);
+        qc.invalidateQueries({ queryKey: ["myListings"] });
+        Alert.alert(
+          "Listing Live!",
+          res.data?.data?.message ?? "Your car rental listing is now live and visible to travellers.",
+          [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+        );
+      } catch (e) {
+        setSaving(false);
+        Alert.alert("Activation Failed", apiErrorMessage(e));
+      }
+    } else {
+      setSaving(false);
+      qc.invalidateQueries({ queryKey: ["myListings"] });
+      Alert.alert(
+        "Car Listing Saved",
+        "Your listing changes have been saved.",
+        [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+      );
+    }
   }
 
   function handleBack() {
@@ -520,13 +561,61 @@ export default function CarWizard() {
     ]);
   }
 
+  const hasMinPhotos = media.photos.length >= 3;
   const isLastStep = step === STEPS.length - 1;
+
+  const lastLabel = ["draft", "deactivated"].includes(status)
+    ? (status === "deactivated" ? "Reactivate Live" : "Activate Live")
+    : "Save & Finish";
+
+  const lastStepDisabled = isLastStep && !hasMinPhotos;
+  const lastStepDisabledHint = isLastStep && !hasMinPhotos
+    ? "Upload at least 3 photos before activating."
+    : undefined;
+
+  if (!listingId) {
+    return (
+      <View style={[s.center, { padding: 24 }]}>
+        <Text style={{ fontSize: 18, fontWeight: "700", color: K.colors.textDark, marginBottom: 8, textAlign: "center" }}>
+          Listing Not Found
+        </Text>
+        <Text style={{ fontSize: 14, color: K.colors.textMuted, marginBottom: 20, textAlign: "center" }}>
+          No listing ID was provided to this setup wizard.
+        </Text>
+        <TouchableOpacity
+          style={{ backgroundColor: K.colors.accent, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
+          onPress={() => router.replace("/(provider)/listings" as any)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Back to My Listings</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (isLoading) {
     return (
       <View style={s.center}>
         <ActivityIndicator size="large" color={K.colors.accent} />
         <Text style={s.loadingText}>Loading your listing…</Text>
+      </View>
+    );
+  }
+
+  if (isError) {
+    return (
+      <View style={[s.center, { padding: 24 }]}>
+        <Text style={{ fontSize: 18, fontWeight: "700", color: K.colors.error, marginBottom: 8, textAlign: "center" }}>
+          Failed to Load Listing
+        </Text>
+        <Text style={{ fontSize: 14, color: K.colors.textMuted, marginBottom: 20, textAlign: "center" }}>
+          Could not fetch listing details from the server. Please verify your internet connection.
+        </Text>
+        <TouchableOpacity
+          style={{ backgroundColor: K.colors.accent, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
+          onPress={() => router.replace("/(provider)/listings" as any)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Back to My Listings</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -551,7 +640,7 @@ export default function CarWizard() {
           {step === 0 && (
             <View>
               <InfoBanner
-                message="Cars go live as soon as the requirements are met — no admin review needed."
+                message="Vehicle listings go live as soon as the requirements are met — no admin review needed."
                 variant="info"
               />
               <View style={s.gap} />
@@ -561,19 +650,9 @@ export default function CarWizard() {
                 required
                 value={form.name}
                 onChangeText={(t) => set("name", t)}
-                placeholder="e.g. Toyota Land Cruiser 2022 – Nairobi"
+                placeholder="e.g. 2022 Toyota Land Cruiser Prado TX"
                 maxLength={200}
                 error={errors.name}
-              />
-
-              <FormField
-                label="Description (optional)"
-                value={form.description}
-                onChangeText={(t) => set("description", t.slice(0, 1000))}
-                placeholder="Describe the vehicle, its condition and what is included"
-                multiline
-                numberOfLines={4}
-                error={errors.description}
               />
 
               <View style={s.row2}>
@@ -593,7 +672,7 @@ export default function CarWizard() {
                     required
                     value={form.carModel}
                     onChangeText={(t) => set("carModel", t)}
-                    placeholder="e.g. Land Cruiser"
+                    placeholder="e.g. Prado"
                     error={errors.carModel}
                   />
                 </View>
@@ -613,24 +692,16 @@ export default function CarWizard() {
                   />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <FormField
-                    label="Colour"
-                    value={form.colour}
-                    onChangeText={(t) => set("colour", t)}
-                    placeholder="e.g. White"
-                    error={errors.colour}
+                  <SelectField
+                    label="Category"
+                    required
+                    options={CAR_CATEGORIES}
+                    selected={form.carCategory}
+                    onSelect={(v) => set("carCategory", v)}
+                    error={errors.carCategory}
                   />
                 </View>
               </View>
-
-              <SelectField
-                label="Vehicle Category"
-                required
-                options={CAR_CATEGORIES}
-                selected={form.carCategory}
-                onSelect={(v) => set("carCategory", v)}
-                error={errors.carCategory}
-              />
 
               <View style={s.row2}>
                 <View style={{ flex: 1 }}>
@@ -639,9 +710,8 @@ export default function CarWizard() {
                     required
                     value={form.licencePlate}
                     onChangeText={(t) => set("licencePlate", t)}
-                    placeholder="e.g. KDA 123X"
+                    placeholder="KDA 123X"
                     autoCapitalize="characters"
-                    maxLength={20}
                     error={errors.licencePlate}
                   />
                 </View>
@@ -651,7 +721,7 @@ export default function CarWizard() {
                     required
                     value={form.odometerReading}
                     onChangeText={(t) => set("odometerReading", t.replace(/\D/g, ""))}
-                    placeholder="e.g. 45000"
+                    placeholder="45000"
                     keyboardType="number-pad"
                     error={errors.odometerReading}
                   />
@@ -661,7 +731,7 @@ export default function CarWizard() {
               <View style={s.row2}>
                 <View style={{ flex: 1 }}>
                   <FormField
-                    label="Fleet Count (units)"
+                    label="Fleet Count"
                     value={form.unitCount}
                     onChangeText={(t) => set("unitCount", t.replace(/\D/g, ""))}
                     placeholder="1"
@@ -671,34 +741,58 @@ export default function CarWizard() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <FormField
-                    label="Engine Size (cc)"
-                    value={form.engineSize}
-                    onChangeText={(t) => set("engineSize", t)}
-                    placeholder="e.g. 2800"
-                    error={errors.engineSize}
+                    label="Colour"
+                    value={form.colour}
+                    onChangeText={(t) => set("colour", t)}
+                    placeholder="e.g. Pearl White"
+                    error={errors.colour}
                   />
                 </View>
               </View>
 
+              <FormField
+                label="Engine Size"
+                value={form.engineSize}
+                onChangeText={(t) => set("engineSize", t)}
+                placeholder="e.g. 2.8L Turbo Diesel"
+                error={errors.engineSize}
+              />
+
+              <FormField
+                label="Description"
+                hint={`${form.description.length}/1000 characters`}
+                value={form.description}
+                onChangeText={(t) => set("description", t.slice(0, 1000))}
+                placeholder="Describe features, condition, luggage capacity…"
+                multiline
+                numberOfLines={4}
+                error={errors.description}
+              />
+
               <SectionHeader
                 title="Pickup Location"
-                subtitle="Search for the pickup point, then drag the pin to the exact spot."
+                subtitle="Search for your depot/office or drag the pin to where renters collect the car."
                 icon="map-pin"
               />
 
               <LocationPicker
-                label="Find the pickup point"
+                label="Find pickup address"
                 value={{ lat: form.lat, lng: form.lng, address: form.address }}
                 onChange={(place) => {
-                  setForm((f) => ({
-                    ...f,
-                    address: place.address || f.address,
-                    town: place.town || f.town,
-                    neighborhood: place.neighborhood || f.neighborhood,
-                    country: place.country || f.country,
-                    lat: place.lat,
-                    lng: place.lng,
-                  }));
+                  setForm((f) => {
+                    const nextCountry = place.country || f.country;
+                    const detectedCurrency = place.country ? getCurrencyForCountry(place.country) : null;
+                    return {
+                      ...f,
+                      address: place.address || f.address,
+                      town: place.town || f.town,
+                      neighborhood: place.neighborhood || f.neighborhood,
+                      country: nextCountry,
+                      currency: detectedCurrency || f.currency,
+                      lat: place.lat,
+                      lng: place.lng,
+                    };
+                  });
                   if (place.country) {
                     setSelectedCountry(ALL_COUNTRIES.find((c) => c.code === place.country) ?? null);
                   }
@@ -710,7 +804,7 @@ export default function CarWizard() {
               />
 
               <FormField
-                label="Pickup Address"
+                label="Full pickup address"
                 required
                 value={form.address}
                 onChangeText={(t) => set("address", t)}
@@ -749,10 +843,10 @@ export default function CarWizard() {
             </View>
           )}
 
-          {/* ── Step 1: Technical specs & features ─────────────────────────── */}
+          {/* ── Step 1: Technical specs ───────────────────────────────────── */}
           {step === 1 && (
             <View>
-              <SectionHeader title="Technical Specs" icon="settings" />
+              <SectionHeader title="Drivetrain & Fuel" icon="settings" />
 
               <SelectField
                 label="Transmission"
@@ -871,6 +965,12 @@ export default function CarWizard() {
                 error={errors.currency}
               />
 
+              <PayoutCurrencyWarning
+                providerCountry={providerCountry}
+                listingCountry={form.country}
+                currency={form.currency}
+              />
+
               <SelectField
                 label="Cancellation Policy"
                 required
@@ -902,7 +1002,7 @@ export default function CarWizard() {
                 <View style={s.row2}>
                   <View style={{ flex: 1 }}>
                     <FormField
-                      label="Daily Km Limit"
+                      label="Daily Limit (km)"
                       required
                       value={form.mileageLimitKm}
                       onChangeText={(t) => set("mileageLimitKm", t.replace(/\D/g, ""))}
@@ -913,7 +1013,7 @@ export default function CarWizard() {
                   </View>
                   <View style={{ flex: 1 }}>
                     <FormField
-                      label="Extra Km Rate"
+                      label="Extra km Rate"
                       value={form.extraKmRate}
                       onChangeText={(t) => set("extraKmRate", t)}
                       placeholder="0.00"
@@ -941,6 +1041,8 @@ export default function CarWizard() {
                 onSelect={(v) => set("insuranceType", v)}
                 error={errors.insuranceType}
               />
+
+              <SectionHeader title="Pickup Hours & Requirements" icon="clock" />
 
               <View style={s.row2}>
                 <View style={{ flex: 1 }}>
@@ -1034,7 +1136,7 @@ export default function CarWizard() {
                 onCapture={() => media.pickAndUploadPhoto("camera")}
                 onDelete={media.deletePhoto}
                 onReorder={media.reorderPhoto}
-                minPhotos={1}
+                minPhotos={3}
                 maxPhotos={30}
                 error={errors.photos}
               />
@@ -1058,10 +1160,14 @@ export default function CarWizard() {
         <WizardFooter
           onNext={isLastStep ? handleFinish : handleNext}
           onBack={handleBack}
+          onSaveDraft={handleSaveDraft}
+          saveDraftLoading={savingDraft}
           isFirst={step === 0}
           isLast={isLastStep}
-          lastLabel="Save & Finish"
+          lastLabel={lastLabel}
           loading={saving}
+          disabled={lastStepDisabled}
+          disabledHint={lastStepDisabledHint}
         />
       </KeyboardAvoidingView>
 

@@ -10,6 +10,7 @@ import {
   Platform,
   BackHandler,
   Keyboard,
+  TouchableOpacity,
 } from "react-native";
 import { useLocalSearchParams, router } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,6 +23,7 @@ import {
   FormField,
   SectionHeader,
   InfoBanner,
+  PayoutCurrencyWarning,
   SwitchRow,
   SelectField,
   CountryPickerButton,
@@ -33,6 +35,7 @@ import {
 } from "./_components";
 import { LocationPicker } from "../../components/maps/LocationPicker";
 import { useListingMedia } from "./_media";
+import { useAuthStore } from "../../store/auth";
 import {
   CANCELLATION_POLICIES,
   groupAmenities,
@@ -42,6 +45,7 @@ import {
   trimOrNull,
   countryOrNull,
   apiErrorMessage,
+  getCurrencyForCountry,
 } from "./_web-parity";
 
 /**
@@ -103,31 +107,31 @@ type FormErrors = Partial<Record<keyof ApartmentState | "photos", string>>;
 
 function initState(l: any): ApartmentState {
   return {
-    name: l.name ?? "",
-    description: l.description ?? "",
-    address: l.address ?? "",
-    lat: toNullableNumber(l.lat),
-    lng: toNullableNumber(l.lng),
-    town: l.town ?? "",
-    neighborhood: l.neighborhood ?? "",
-    country: l.country ?? "",
-    pricePerNight: l.pricePerNight ? String(l.pricePerNight) : "",
-    currency: l.currency ?? "USD",
-    minStayNights: l.minStayNights ? String(l.minStayNights) : "1",
-    checkinTime: l.checkinTime ?? "14:00",
-    checkoutTime: l.checkoutTime ?? "11:00",
-    cancellationPolicy: l.cancellationPolicy ?? "flexible",
-    smokingAllowed: l.smokingAllowed ?? false,
-    petsAllowed: l.petsAllowed ?? false,
-    allowPreBooking: l.allowPreBooking ?? false,
-    bedrooms: l.bedrooms != null ? String(l.bedrooms) : "",
-    bathrooms: l.bathrooms != null ? String(l.bathrooms) : "",
-    maxGuests: l.maxGuests != null ? String(l.maxGuests) : "",
-    longStayEnabled: l.longStayEnabled ?? false,
-    longStayMinNights: l.longStayMinNights != null ? String(l.longStayMinNights) : "30",
-    longStayDiscountValue: l.longStayDiscountValue != null ? String(l.longStayDiscountValue) : "",
-    selectedAmenities: flattenGroupedAmenities(l.amenities),
-    customAmenities: (l.customAmenities ?? [])
+    name: l?.name ?? "",
+    description: l?.description ?? "",
+    address: l?.address ?? "",
+    lat: toNullableNumber(l?.lat),
+    lng: toNullableNumber(l?.lng),
+    town: l?.town ?? "",
+    neighborhood: l?.neighborhood ?? "",
+    country: l?.country ?? "",
+    pricePerNight: l?.pricePerNight ? String(l.pricePerNight) : "",
+    currency: l?.currency ?? "USD",
+    minStayNights: l?.minStayNights ? String(l.minStayNights) : "1",
+    checkinTime: l?.checkinTime ?? "14:00",
+    checkoutTime: l?.checkoutTime ?? "11:00",
+    cancellationPolicy: l?.cancellationPolicy ?? "flexible",
+    smokingAllowed: l?.smokingAllowed ?? false,
+    petsAllowed: l?.petsAllowed ?? false,
+    allowPreBooking: l?.allowPreBooking ?? false,
+    bedrooms: l?.bedrooms != null ? String(l.bedrooms) : "",
+    bathrooms: l?.bathrooms != null ? String(l.bathrooms) : "",
+    maxGuests: l?.maxGuests != null ? String(l.maxGuests) : "",
+    longStayEnabled: l?.longStayEnabled ?? false,
+    longStayMinNights: l?.longStayMinNights != null ? String(l.longStayMinNights) : "30",
+    longStayDiscountValue: l?.longStayDiscountValue != null ? String(l.longStayDiscountValue) : "",
+    selectedAmenities: flattenGroupedAmenities(l?.amenities),
+    customAmenities: (l?.customAmenities ?? [])
       .map((x: any) => (typeof x === "string" ? x : (x?.label ?? "")))
       .filter(Boolean),
   };
@@ -195,12 +199,16 @@ function buildPayload(s: ApartmentState): Record<string, unknown> {
 // ── Screen ──────────────────────────────────────────────────────────────────
 
 export default function ApartmentWizard() {
-  const { id } = useLocalSearchParams<{ id?: string }>();
-  const listingId = String(id ?? "");
+  const params = useLocalSearchParams<{ id?: string }>();
+  const rawId = params.id;
+  const listingId = (Array.isArray(rawId) ? rawId[0] : rawId) ?? "";
+
   const qc = useQueryClient();
+  const providerCountry = useAuthStore((st) => st.user?.country);
 
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [countryModalOpen, setCountryModalOpen] = useState(false);
   const [customAmenityInput, setCustomAmenityInput] = useState("");
@@ -211,7 +219,7 @@ export default function ApartmentWizard() {
 
   const media = useListingMedia(listingId);
 
-  const { data: listing, isLoading } = useQuery({
+  const { data: listing, isLoading, isError } = useQuery({
     queryKey: ["listing", listingId],
     queryFn: async () => {
       const res = await listingApi.get<{ data: any }>(`/listings/${listingId}`);
@@ -219,6 +227,8 @@ export default function ApartmentWizard() {
     },
     enabled: !!listingId,
   });
+
+  const status = listing?.status ?? "draft";
 
   // Hydrate once per listing load; re-hydrating on every refetch would wipe
   // unsaved edits mid-wizard.
@@ -263,6 +273,10 @@ export default function ApartmentWizard() {
   function selectCountry(c: CountryData) {
     setSelectedCountry(c);
     set("country", c.code);
+    const detectedCurrency = getCurrencyForCountry(c.code);
+    if (detectedCurrency) {
+      set("currency", detectedCurrency);
+    }
   }
 
   // ── Validation — port of web validateStep ─────────────────────────────────
@@ -311,6 +325,16 @@ export default function ApartmentWizard() {
     }
   }
 
+  async function handleSaveDraft() {
+    setSavingDraft(true);
+    const ok = await saveAll();
+    setSavingDraft(false);
+    if (ok) {
+      qc.invalidateQueries({ queryKey: ["myListings"] });
+      Alert.alert("Draft Saved", "Your listing progress has been saved.");
+    }
+  }
+
   async function handleNext() {
     if (!validateStep(step)) return;
     setSaving(true);
@@ -323,17 +347,34 @@ export default function ApartmentWizard() {
     if (!validateStep(step)) return;
     setSaving(true);
     const ok = await saveAll();
-    setSaving(false);
-    if (!ok) return;
-    qc.invalidateQueries({ queryKey: ["myListings"] });
-    Alert.alert(
-      "Apartment Listing Saved",
-      "Your listing has been saved. Review the requirements and activate it whenever you are ready.",
-      [
-        { text: "Later", onPress: () => router.replace("/(provider)/listings" as any) },
-        { text: "Review & Activate", onPress: () => router.replace(`/listings/${listingId}/submit` as any) },
-      ]
-    );
+    if (!ok) {
+      setSaving(false);
+      return;
+    }
+
+    if (["draft", "deactivated"].includes(status)) {
+      try {
+        const res = await listingApi.post(`/listings/${listingId}/activate`);
+        setSaving(false);
+        qc.invalidateQueries({ queryKey: ["myListings"] });
+        Alert.alert(
+          "Listing Live!",
+          res.data?.data?.message ?? "Your apartment listing is now live and visible to travellers.",
+          [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+        );
+      } catch (e) {
+        setSaving(false);
+        Alert.alert("Activation Failed", apiErrorMessage(e));
+      }
+    } else {
+      setSaving(false);
+      qc.invalidateQueries({ queryKey: ["myListings"] });
+      Alert.alert(
+        "Apartment Listing Saved",
+        "Your listing changes have been saved.",
+        [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+      );
+    }
   }
 
   function handleBack() {
@@ -348,13 +389,61 @@ export default function ApartmentWizard() {
     ]);
   }
 
+  const hasMinPhotos = media.photos.length >= 3;
   const isLastStep = step === STEPS.length - 1;
+
+  const lastLabel = ["draft", "deactivated"].includes(status)
+    ? (status === "deactivated" ? "Reactivate Live" : "Activate Live")
+    : "Save & Finish";
+
+  const lastStepDisabled = isLastStep && !hasMinPhotos;
+  const lastStepDisabledHint = isLastStep && !hasMinPhotos
+    ? "Upload at least 3 photos before activating."
+    : undefined;
+
+  if (!listingId) {
+    return (
+      <View style={[s.center, { padding: 24 }]}>
+        <Text style={{ fontSize: 18, fontWeight: "700", color: K.colors.textDark, marginBottom: 8, textAlign: "center" }}>
+          Listing Not Found
+        </Text>
+        <Text style={{ fontSize: 14, color: K.colors.textMuted, marginBottom: 20, textAlign: "center" }}>
+          No listing ID was provided to this setup wizard.
+        </Text>
+        <TouchableOpacity
+          style={{ backgroundColor: K.colors.accent, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
+          onPress={() => router.replace("/(provider)/listings" as any)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Back to My Listings</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (isLoading) {
     return (
       <View style={s.center}>
         <ActivityIndicator size="large" color={K.colors.accent} />
         <Text style={s.loadingText}>Loading your listing…</Text>
+      </View>
+    );
+  }
+
+  if (isError) {
+    return (
+      <View style={[s.center, { padding: 24 }]}>
+        <Text style={{ fontSize: 18, fontWeight: "700", color: K.colors.error, marginBottom: 8, textAlign: "center" }}>
+          Failed to Load Listing
+        </Text>
+        <Text style={{ fontSize: 14, color: K.colors.textMuted, marginBottom: 20, textAlign: "center" }}>
+          Could not fetch listing details from the server. Please verify your internet connection.
+        </Text>
+        <TouchableOpacity
+          style={{ backgroundColor: K.colors.accent, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
+          onPress={() => router.replace("/(provider)/listings" as any)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Back to My Listings</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -416,15 +505,20 @@ export default function ApartmentWizard() {
                 label="Find your apartment"
                 value={{ lat: form.lat, lng: form.lng, address: form.address }}
                 onChange={(place) => {
-                  setForm((f) => ({
-                    ...f,
-                    address: place.address || f.address,
-                    town: place.town || f.town,
-                    neighborhood: place.neighborhood || f.neighborhood,
-                    country: place.country || f.country,
-                    lat: place.lat,
-                    lng: place.lng,
-                  }));
+                  setForm((f) => {
+                    const nextCountry = place.country || f.country;
+                    const detectedCurrency = place.country ? getCurrencyForCountry(place.country) : null;
+                    return {
+                      ...f,
+                      address: place.address || f.address,
+                      town: place.town || f.town,
+                      neighborhood: place.neighborhood || f.neighborhood,
+                      country: nextCountry,
+                      currency: detectedCurrency || f.currency,
+                      lat: place.lat,
+                      lng: place.lng,
+                    };
+                  });
                   if (place.country) {
                     setSelectedCountry(ALL_COUNTRIES.find((c) => c.code === place.country) ?? null);
                   }
@@ -497,6 +591,12 @@ export default function ApartmentWizard() {
                 selected={form.currency}
                 onSelect={(v) => set("currency", v)}
                 error={errors.currency}
+              />
+
+              <PayoutCurrencyWarning
+                providerCountry={providerCountry}
+                listingCountry={form.country}
+                currency={form.currency}
               />
 
               <FormField
@@ -693,10 +793,14 @@ export default function ApartmentWizard() {
         <WizardFooter
           onNext={isLastStep ? handleFinish : handleNext}
           onBack={handleBack}
+          onSaveDraft={handleSaveDraft}
+          saveDraftLoading={savingDraft}
           isFirst={step === 0}
           isLast={isLastStep}
-          lastLabel="Save & Finish"
+          lastLabel={lastLabel}
           loading={saving}
+          disabled={lastStepDisabled}
+          disabledHint={lastStepDisabledHint}
         />
       </KeyboardAvoidingView>
 

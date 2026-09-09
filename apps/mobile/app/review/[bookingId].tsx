@@ -22,6 +22,10 @@ import { K } from "../../constants/theme";
 
 interface BookingMeta {
   reference: string;
+  status: string;
+  checkOut?: string | null;
+  returnDatetime?: string | null;
+  hasReview?: boolean;
   listing: { id: string; title: string };
 }
 
@@ -94,6 +98,46 @@ export default function ReviewScreen() {
         <View style={styles.centered}>
           <Ionicons name="alert-circle-outline" size={56} color={K.colors.error} />
           <Text style={styles.errorTitle}>Could not load booking</Text>
+          <TouchableOpacity style={styles.primaryBtn} onPress={() => router.back()}>
+            <Text style={styles.primaryBtnText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const checkoutRaw = bookingMeta?.returnDatetime || bookingMeta?.checkOut;
+  const isPastCheckout = checkoutRaw ? new Date(checkoutRaw).getTime() <= Date.now() : false;
+  const isCompleted = bookingMeta?.status === "completed";
+
+  if (bookingMeta && (!isCompleted || !isPastCheckout)) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.centered}>
+          <Ionicons name="time-outline" size={56} color={K.colors.accent} />
+          <Text style={styles.errorTitle}>Review Not Available Yet</Text>
+          <Text style={{ textAlign: "center", color: "#6b7280", marginTop: 8, marginHorizontal: 32, fontSize: 14, lineHeight: 20 }}>
+            {checkoutRaw
+              ? `Reviews can only be submitted after checkout (${new Date(checkoutRaw).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}) once your stay is completed.`
+              : "Reviews can only be submitted after your stay is completed."}
+          </Text>
+          <TouchableOpacity style={styles.primaryBtn} onPress={() => router.back()}>
+            <Text style={styles.primaryBtnText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (bookingMeta?.hasReview) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.centered}>
+          <Ionicons name="checkmark-circle-outline" size={56} color={K.colors.success} />
+          <Text style={styles.errorTitle}>Review Already Submitted</Text>
+          <Text style={{ textAlign: "center", color: "#6b7280", marginTop: 8, marginHorizontal: 32, fontSize: 14, lineHeight: 20 }}>
+            You have already submitted a review for this booking. Thank you for your feedback!
+          </Text>
           <TouchableOpacity style={styles.primaryBtn} onPress={() => router.back()}>
             <Text style={styles.primaryBtnText}>Go Back</Text>
           </TouchableOpacity>
