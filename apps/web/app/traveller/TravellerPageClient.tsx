@@ -30,6 +30,29 @@ import { isTaraCountry } from "@zika/types";
 import { geocodePlaceText, getSearchOrigin } from "@/lib/geo";
 import { PlaceAutocomplete } from "@/components/maps/PlaceAutocomplete";
 import type { ResolvedPlace } from "@/lib/google-maps";
+import { getCountry } from "countries-and-timezones";
+import { ALL_COUNTRIES } from "@/lib/countries";
+
+interface DynamicCuratedDestination {
+  key: string;
+  town: string;
+  country: string;
+  displayName: string;
+  count: number;
+  img: string;
+  primaryCategory: "hotel" | "apartment" | "car";
+  minDistance: number;
+}
+
+function formatCountryName(c: string): string {
+  if (!c) return "";
+  const trimmed = c.trim();
+  if (trimmed.length === 2) {
+    const match = ALL_COUNTRIES.find((item) => item.code.toUpperCase() === trimmed.toUpperCase());
+    if (match) return match.name;
+  }
+  return trimmed;
+}
 
 // Accent-insensitive matching: strips diacritics so "makepe" matches "Maképé".
 function normalizeText(value: string): string {
@@ -538,6 +561,10 @@ export default function TravellerDashboard() {
   const [loadingFeatured, setLoadingFeatured] = useState(false);
   const featuredLoadedRef = useRef(false);
 
+  // Dynamic curated destinations on home tab (from real listings in visitor's region)
+  const [curatedDestinations, setCuratedDestinations] = useState<DynamicCuratedDestination[]>([]);
+  const curatedLoadedRef = useRef(false);
+
   // Quick-result dropdown when user taps Hotels / Apartments / Car Rentals in hero form
   const [quickResults, setQuickResults] = useState<PublicListingDetail[]>([]);
   const [showQuickDrop, setShowQuickDrop] = useState(false);
@@ -777,6 +804,142 @@ export default function TravellerDashboard() {
     }
   }
 
+  // Dynamically load top curated destinations from real listings around the visitor's location
+  async function loadCuratedDestinations() {
+    try {
+      const origin = await getSearchOrigin();
+      // Fetch accommodations (hotels & apartments) nearest to visitor's origin
+      const [hotelRes, aptRes] = await Promise.allSettled([
+        listingApi.get<any>("/search", {
+          params: { category: "hotel", limit: 50, lat: origin.lat, lng: origin.lng },
+        }),
+        listingApi.get<any>("/search", {
+          params: { category: "apartment", limit: 50, lat: origin.lat, lng: origin.lng },
+        }),
+      ]);
+
+      const rawHotels = hotelRes.status === "fulfilled" ? (hotelRes.value.data?.data?.results ?? hotelRes.value.data?.data ?? []) : [];
+      const rawApts = aptRes.status === "fulfilled" ? (aptRes.value.data?.data?.results ?? aptRes.value.data?.data ?? []) : [];
+      const allRaw = [
+        ...(Array.isArray(rawHotels) ? rawHotels : []),
+        ...(Array.isArray(rawApts) ? rawApts : []),
+      ];
+
+      if (allRaw.length === 0) {
+        setCuratedDestinations([]);
+        return;
+      }
+
+      // Determine visitor's continent/region
+      const userTz = typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "";
+      const isAfricanUser = userTz.startsWith("Africa/");
+      const continentPrefix = userTz.includes("/") ? userTz.split("/")[0] + "/" : "";
+
+      // Group listings by destination (town + country)
+      const groups = new Map<string, {
+        town: string;
+        country: string;
+        countryCode: string;
+        count: number;
+        img: string;
+        categoryCounts: { hotel: number; apartment: number; car: number };
+        minDistance: number;
+      }>();
+
+      for (const item of allRaw) {
+        const mapped = mapSearchResult(item);
+        const town = (mapped.town || "").trim();
+        const rawCountry = (mapped.country || "").trim();
+        const countryCode = rawCountry.toUpperCase();
+        const countryName = formatCountryName(rawCountry);
+
+        // Skip listings without location info
+        if (!town && !countryName) continue;
+
+        // Regional filter:
+        // 1. If visitor is in Africa, only show African destinations
+        // 2. If visitor is outside Africa, only show destinations in their continent or within regional proximity (<3500km)
+        const countryData = getCountry(countryCode);
+        const listingIsAfrica =
+          countryData?.timezones?.some((t) => t.startsWith("Africa/")) ??
+          (countryCode === "KE" || countryCode === "TZ" || countryCode === "UG" || countryCode === "RW" || countryCode === "NG" || countryCode === "ZA");
+
+        if (isAfricanUser && !listingIsAfrica) {
+          continue; // User is in Africa, omit non-African listings
+        }
+        if (!isAfricanUser) {
+          const listingInUserContinent = continentPrefix && countryData?.timezones?.some((t) => t.startsWith(continentPrefix));
+          const isNearby = mapped.distanceKm != null && mapped.distanceKm < 3500;
+          if (!listingInUserContinent && !isNearby) {
+            continue; // Listing is not in user's region
+          }
+        }
+
+        const photo = mapped.primaryPhotoUrl || mapped.primaryPhotoThumbUrl || mapped.photos?.[0]?.cdnUrl || "";
+        const key = `${town.toLowerCase()}__${countryCode.toLowerCase()}`;
+        const cat = (mapped.category === "apartment" || mapped.category === "car") ? mapped.category : "hotel";
+        const dist = mapped.distanceKm ?? 999999;
+
+        const existing = groups.get(key);
+        if (existing) {
+          existing.count += 1;
+          existing.categoryCounts[cat] = (existing.categoryCounts[cat] || 0) + 1;
+          if (!existing.img && photo) existing.img = photo;
+          if (dist < existing.minDistance) existing.minDistance = dist;
+        } else {
+          groups.set(key, {
+            town,
+            country: countryName,
+            countryCode,
+            count: 1,
+            img: photo,
+            categoryCounts: { hotel: cat === "hotel" ? 1 : 0, apartment: cat === "apartment" ? 1 : 0, car: 0 },
+            minDistance: dist,
+          });
+        }
+      }
+
+      // Filter only destinations that have a real image
+      const candidates: DynamicCuratedDestination[] = [];
+      for (const [key, g] of groups.entries()) {
+        if (!g.img) continue; // Real photo required to advertise
+        const displayName = g.town && g.country ? `${g.town}, ${g.country}` : (g.town || g.country);
+        const primaryCat = g.categoryCounts.apartment > g.categoryCounts.hotel ? "apartment" : "hotel";
+        candidates.push({
+          key,
+          town: g.town,
+          country: g.country,
+          displayName,
+          count: g.count,
+          img: g.img,
+          primaryCategory: primaryCat,
+          minDistance: g.minDistance,
+        });
+      }
+
+      // Sort destinations: closest to user first; tiebreak by property count
+      candidates.sort((a, b) => {
+        if (Math.abs(a.minDistance - b.minDistance) > 100) {
+          return a.minDistance - b.minDistance;
+        }
+        return b.count - a.count;
+      });
+
+      setCuratedDestinations(candidates.slice(0, 3));
+    } catch (err) {
+      console.error("Failed to load curated destinations:", err);
+      setCuratedDestinations([]);
+    }
+  }
+
+  function handleSelectCuratedDestination(dest: DynamicCuratedDestination) {
+    const targetCategory = dest.primaryCategory || searchCategory || "hotel";
+    const searchTerm = dest.town || dest.displayName;
+    setSearchCategory(targetCategory);
+    setSearchDestination(searchTerm);
+    handleSearch(undefined, targetCategory, searchTerm);
+  }
+
   // Re-fetch whatever's currently on screen when the display currency changes.
   // listingApi's request interceptor already attaches the new `currency` param
   // to every call; these are plain axios calls (not react-query), so nothing
@@ -836,11 +999,12 @@ export default function TravellerDashboard() {
     if (hasAuthToken) fetchWalletVouchers();
   }, [hasAuthToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load featured hotel listings once when home tab is first shown
+  // Load featured hotel listings and dynamic curated destinations once when home tab is first shown
   useEffect(() => {
     if (activeTab === "home" && !featuredLoadedRef.current) {
       featuredLoadedRef.current = true;
       loadFeaturedListings("hotel");
+      loadCuratedDestinations();
     }
   }, [activeTab]);
 
@@ -3585,68 +3749,106 @@ export default function TravellerDashboard() {
               </div>
             </div>
 
-            {/* ── CURATED WORLDS ── */}
-            <section className="max-w-7xl mx-auto px-4 sm:px-6 py-16">
-              <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-10">
-                <div>
-                  <p className="text-[10px] font-semibold text-[#1D8D2B] uppercase tracking-[0.3em] mb-2">Curated Worlds</p>
-                  <h2 className="text-3xl md:text-4xl font-serif text-slate-900 leading-snug">
-                    Discover Destinations Selected for the<br className="hidden sm:block" /> Discerning Traveler.
-                  </h2>
-                </div>
-                {/* <button
-                  onClick={() => handleSearch(undefined, "hotel")}
-                  className="text-sm font-semibold text-[#0c2614] hover:text-[#1D8D2B] transition underline underline-offset-4 shrink-0"
-                >
-                  View All Destinations
-                </button> */}
-              </div>
-
-              {/* Asymmetric grid: 1 large left + 2 stacked right */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Large left */}
-                <button
-                  type="button"
-                  onClick={() => { setSearchDestination("Amalfi Coast, Italy"); handleSearch(undefined, "hotel", "Amalfi Coast, Italy"); }}
-                  className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300"
-                  style={{ minHeight: "420px" }}
-                >
-                  <img
-                    src="https://images.unsplash.com/photo-1533104816931-20fa691ff6ca?w=900&q=85"
-                    alt="Amalfi Coast, Italy"
-                    className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
-                  <div className="absolute bottom-0 left-0 p-6 text-left">
-                    <p className="text-white font-serif text-2xl font-light leading-snug">Amalfi Coast, Italy</p>
-                    <p className="text-white/65 text-xs font-medium mt-1 tracking-wide">120+ Exclusive Properties</p>
+            {/* ── CURATED WORLDS (Dynamic from real listings in visitor's region) ── */}
+            {curatedDestinations.length > 0 && (
+              <section className="max-w-7xl mx-auto px-4 sm:px-6 py-16">
+                <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-10">
+                  <div>
+                    <p className="text-[10px] font-semibold text-[#1D8D2B] uppercase tracking-[0.3em] mb-2">Curated Worlds</p>
+                    <h2 className="text-3xl md:text-4xl font-serif text-slate-900 leading-snug">
+                      Discover Destinations Selected for the<br className="hidden sm:block" /> Discerning Traveler.
+                    </h2>
                   </div>
-                </button>
-
-                {/* Right column — 2 stacked */}
-                <div className="grid grid-rows-2 gap-4">
-                  {[
-                    { name: "Kyoto", country: "Japan", img: "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=600&q=85", props: "80+" },
-                    { name: "Santorini", country: "Greece", img: "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=85", props: "95+" },
-                  ].map((dest) => (
-                    <button
-                      key={dest.name}
-                      type="button"
-                      onClick={() => { setSearchDestination(`${dest.name}, ${dest.country}`); handleSearch(undefined, "hotel", `${dest.name}, ${dest.country}`); }}
-                      className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300"
-                      style={{ minHeight: "198px" }}
-                    >
-                      <img src={dest.img} alt={`${dest.name}, ${dest.country}`} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700" />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
-                      <div className="absolute bottom-0 left-0 p-5 text-left">
-                        <p className="text-white font-serif text-xl font-light">{dest.name}, {dest.country}</p>
-                        <p className="text-white/65 text-xs font-medium mt-0.5 tracking-wide">{dest.props} Exclusive Properties</p>
-                      </div>
-                    </button>
-                  ))}
                 </div>
-              </div>
-            </section>
+
+                {curatedDestinations.length >= 3 && curatedDestinations[0] ? (
+                  /* Asymmetric grid: 1 large left + 2 stacked right */
+                  (() => {
+                    const primary = curatedDestinations[0]!;
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Large left */}
+                        <button
+                          type="button"
+                          onClick={() => handleSelectCuratedDestination(primary)}
+                          className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300 text-left"
+                          style={{ minHeight: "420px" }}
+                        >
+                          <img
+                            src={primary.img}
+                            alt={primary.displayName}
+                            className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+                          <div className="absolute bottom-0 left-0 p-6 text-left">
+                            <p className="text-white font-serif text-2xl font-light leading-snug">
+                              {primary.displayName}
+                            </p>
+                            <p className="text-white/75 text-xs font-medium mt-1 tracking-wide">
+                              {primary.count === 1
+                                ? "1 Exclusive Property"
+                                : `${primary.count}+ Exclusive Properties`}
+                            </p>
+                          </div>
+                        </button>
+
+                        {/* Right column — 2 stacked */}
+                        <div className="grid grid-rows-2 gap-4">
+                          {curatedDestinations.slice(1, 3).map((dest) => (
+                            <button
+                              key={dest.key}
+                              type="button"
+                              onClick={() => handleSelectCuratedDestination(dest)}
+                              className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300 text-left"
+                              style={{ minHeight: "198px" }}
+                            >
+                              <img
+                                src={dest.img}
+                                alt={dest.displayName}
+                                className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                              />
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+                              <div className="absolute bottom-0 left-0 p-5 text-left">
+                                <p className="text-white font-serif text-xl font-light">{dest.displayName}</p>
+                                <p className="text-white/75 text-xs font-medium mt-0.5 tracking-wide">
+                                  {dest.count === 1 ? "1 Exclusive Property" : `${dest.count}+ Exclusive Properties`}
+                                </p>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  /* Responsive grid for 1 or 2 destinations */
+                  <div className={`grid grid-cols-1 ${curatedDestinations.length === 2 ? "md:grid-cols-2" : ""} gap-4`}>
+                    {curatedDestinations.map((dest) => (
+                      <button
+                        key={dest.key}
+                        type="button"
+                        onClick={() => handleSelectCuratedDestination(dest)}
+                        className="group relative rounded-2xl overflow-hidden cursor-pointer shadow-md hover:shadow-xl transition-all duration-300 text-left"
+                        style={{ minHeight: "320px" }}
+                      >
+                        <img
+                          src={dest.img}
+                          alt={dest.displayName}
+                          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+                        <div className="absolute bottom-0 left-0 p-6 text-left">
+                          <p className="text-white font-serif text-2xl font-light leading-snug">{dest.displayName}</p>
+                          <p className="text-white/75 text-xs font-medium mt-1 tracking-wide">
+                            {dest.count === 1 ? "1 Exclusive Property" : `${dest.count}+ Exclusive Properties`}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             {/* ── STAY IN EXCELLENCE ── */}
             <section className="bg-[#f7f6f3] py-16 border-y border-slate-200/60">
