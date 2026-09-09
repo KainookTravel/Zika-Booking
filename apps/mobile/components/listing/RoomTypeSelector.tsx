@@ -9,6 +9,7 @@ interface RoomTypeSelectorProps {
   onSelectRoomType: (roomTypeId: string) => void;
   currency?: string;
   discountPercent?: number | null;
+  unavailableRoomTypeIds?: Set<string>;
 }
 
 const TEXT = "#111827";
@@ -21,6 +22,7 @@ export function RoomTypeSelector({
   onSelectRoomType,
   currency = "XAF",
   discountPercent,
+  unavailableRoomTypeIds,
 }: RoomTypeSelectorProps) {
   if (!roomTypes || roomTypes.length === 0) {
     return null;
@@ -52,6 +54,7 @@ export function RoomTypeSelector({
             onSelect={() => onSelectRoomType(rt.id)}
             currency={currency}
             discountPercent={discountPercent}
+            isUnavailableForDates={unavailableRoomTypeIds?.has(rt.id)}
           />
         ))}
       </View>

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   View, Text, ScrollView, TouchableOpacity, FlatList, TextInput,
   ActivityIndicator, Alert, StyleSheet, Dimensions,
@@ -14,6 +14,10 @@ import { ListingImage } from "../../components/ListingImage";
 import { ActivePromotion, applyPromotion } from "../../lib/promotions";
 import { RoomTypeSelector } from "../../components/listing/RoomTypeSelector";
 import type { RoomType } from "../../components/listing/RoomTypeCard";
+import DateRangePickerModal, {
+  expandRangesToDateSet,
+  hasBookedNightInRange,
+} from "../../components/ui/DateRangePickerModal";
 import { useRefreshOnFocus } from "../../hooks/useRefreshOnFocus";
 import { WEB_BASE_URL } from "../../constants/legalContent";
 import { approxPrefix } from "../../lib/currency";
@@ -344,262 +348,18 @@ function Skeleton() {
   );
 }
 
-// ── Calendar Date Picker ──────────────────────────────────────────────────────
-const CAL_WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
-const CAL_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-function calToStr(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function isBeforeToday(d: Date): boolean {
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  return d.getTime() < today.getTime();
-}
-
-function isInUnavailable(ds: string, ranges: { start: string; end: string }[]): boolean {
-  return ranges.some(r => {
-    const s = r.start.split("T")[0]!;
-    const e = r.end.split("T")[0]!;
-    return ds >= s && ds <= e;
-  });
-}
-
-function buildMonthGrid(year: number, month: number): (Date | null)[] {
-  const firstWeekday = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const arr: (Date | null)[] = Array(firstWeekday).fill(null);
-  for (let d = 1; d <= daysInMonth; d++) arr.push(new Date(year, month, d));
-  return arr;
-}
-
-interface CalPickerProps {
-  visible: boolean;
-  onClose: () => void;
-  onConfirm: (start: string, end: string) => void;
-  isCar: boolean;
+// ── Availability Interfaces ───────────────────────────────────────────────────
+interface RoomTypeAvailability {
+  roomTypeId: string;
+  roomType: string;
+  name: string;
+  unitCount: number;
   unavailableRanges: { start: string; end: string }[];
 }
 
-function CalendarPicker({ visible, onClose, onConfirm, isCar, unavailableRanges }: CalPickerProps) {
-  const now = new Date();
-  const [viewYear, setViewYear] = useState(now.getFullYear());
-  const [viewMonth, setViewMonth] = useState(now.getMonth());
-  const [selStart, setSelStart] = useState<string | null>(null);
-  const [selEnd, setSelEnd] = useState<string | null>(null);
-  const [pickupHr, setPickupHr] = useState("10");
-  const [pickupMin, setPickupMin] = useState("00");
-  const [returnHr, setReturnHr] = useState("10");
-  const [returnMin, setReturnMin] = useState("00");
-
-  function resetPicker() {
-    setSelStart(null); setSelEnd(null);
-    setPickupHr("10"); setPickupMin("00");
-    setReturnHr("10"); setReturnMin("00");
-  }
-
-  const monthDays = buildMonthGrid(viewYear, viewMonth);
-  const DAY_SIZE = (W - 32) / 7;
-
-  function prevMonth() {
-    if (viewMonth === 0) { setViewYear(y => y - 1); setViewMonth(11); }
-    else setViewMonth(m => m - 1);
-  }
-  function nextMonth() {
-    if (viewMonth === 11) { setViewYear(y => y + 1); setViewMonth(0); }
-    else setViewMonth(m => m + 1);
-  }
-
-  function handleDayPress(d: Date) {
-    const ds = calToStr(d);
-    if (!selStart || (selStart && selEnd)) {
-      setSelStart(ds); setSelEnd(null);
-    } else if (ds <= selStart) {
-      setSelStart(ds); setSelEnd(null);
-    } else {
-      setSelEnd(ds);
-      // Completing the range is the confirmation — no separate Confirm step.
-      // Cars keep theirs: pickup/return times live in this same sheet, so
-      // closing here would silently commit the 10:00 defaults.
-      if (!isCar) {
-        onConfirm(selStart, ds);
-        onClose();
-      }
-    }
-  }
-
-  type DayState = "start" | "end" | "range" | "normal" | "disabled";
-  function getDayState(d: Date): DayState {
-    const ds = calToStr(d);
-    if (isBeforeToday(d) || isInUnavailable(ds, unavailableRanges)) return "disabled";
-    if (ds === selStart) return "start";
-    if (ds === selEnd) return "end";
-    if (selStart && selEnd && ds > selStart && ds < selEnd) return "range";
-    return "normal";
-  }
-
-  function handleConfirm() {
-    if (!selStart || !selEnd) return;
-    if (isCar) {
-      const pu = new Date(`${selStart}T${pickupHr.padStart(2, "0")}:${pickupMin.padStart(2, "0")}:00`).toISOString();
-      const rt = new Date(`${selEnd}T${returnHr.padStart(2, "0")}:${returnMin.padStart(2, "0")}:00`).toISOString();
-      onConfirm(pu, rt);
-    } else {
-      onConfirm(selStart, selEnd);
-    }
-    resetPicker();
-    onClose();
-  }
-
-  const canConfirm = !!(selStart && selEnd);
-
-  return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => { resetPicker(); onClose(); }}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
-        {/* Header */}
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: BORDER }}>
-          <Text style={{ fontSize: 18, fontWeight: "800", color: TEXT }}>{isCar ? "Select Rental Period" : "Select Dates"}</Text>
-          <TouchableOpacity onPress={() => { resetPicker(); onClose(); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Ionicons name="close" size={24} color={TEXT} />
-          </TouchableOpacity>
-        </View>
-
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
-          {/* Month navigation */}
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingVertical: 14 }}>
-            <TouchableOpacity onPress={prevMonth} style={{ padding: 8, borderRadius: 10, backgroundColor: GREEN_LIGHT }}>
-              <Ionicons name="chevron-back" size={20} color={GREEN} />
-            </TouchableOpacity>
-            <Text style={{ fontSize: 16, fontWeight: "700", color: TEXT }}>{CAL_MONTHS[viewMonth]} {viewYear}</Text>
-            <TouchableOpacity onPress={nextMonth} style={{ padding: 8, borderRadius: 10, backgroundColor: GREEN_LIGHT }}>
-              <Ionicons name="chevron-forward" size={20} color={GREEN} />
-            </TouchableOpacity>
-          </View>
-
-          {/* Weekday labels */}
-          <View style={{ flexDirection: "row", paddingHorizontal: 16 }}>
-            {CAL_WEEKDAYS.map(w => (
-              <Text key={w} style={{ width: DAY_SIZE, textAlign: "center", fontSize: 12, fontWeight: "600", color: MUTED, paddingBottom: 6 }}>{w}</Text>
-            ))}
-          </View>
-
-          {/* Day grid */}
-          <View style={{ flexDirection: "row", flexWrap: "wrap", paddingHorizontal: 16 }}>
-            {monthDays.map((d, i) => {
-              if (!d) return <View key={`e${i}`} style={{ width: DAY_SIZE, height: 44 }} />;
-              const st = getDayState(d);
-              const isStart = st === "start";
-              const isEnd = st === "end";
-              const isRange = st === "range";
-              const isDisabled = st === "disabled";
-              return (
-                <View key={i} style={{ width: DAY_SIZE, height: 44, alignItems: "center", justifyContent: "center" }}>
-                  {isRange && <View style={{ position: "absolute", left: 0, right: 0, top: 7, bottom: 7, backgroundColor: GREEN_LIGHT }} />}
-                  {isEnd && selStart && <View style={{ position: "absolute", left: 0, right: "50%", top: 7, bottom: 7, backgroundColor: GREEN_LIGHT }} />}
-                  {isStart && selEnd && <View style={{ position: "absolute", left: "50%", right: 0, top: 7, bottom: 7, backgroundColor: GREEN_LIGHT }} />}
-                  <TouchableOpacity
-                    onPress={() => !isDisabled && handleDayPress(d)}
-                    disabled={isDisabled}
-                    style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: (isStart || isEnd) ? GREEN : "transparent", alignItems: "center", justifyContent: "center" }}
-                  >
-                    <Text style={{ fontSize: 14, fontWeight: (isStart || isEnd) ? "700" : "400", color: isDisabled ? "#D1D5DB" : (isStart || isEnd) ? "#fff" : TEXT }}>
-                      {d.getDate()}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              );
-            })}
-          </View>
-
-          {/* Status hint */}
-          <View style={{ paddingHorizontal: 20, paddingTop: 14 }}>
-            {!selStart && (
-              <Text style={{ fontSize: 13, color: MUTED, textAlign: "center" }}>
-                Tap to select your {isCar ? "pickup" : "check-in"} date
-              </Text>
-            )}
-            {selStart && !selEnd && (
-              <Text style={{ fontSize: 13, color: MUTED, textAlign: "center" }}>
-                Now tap your {isCar ? "return" : "check-out"} date
-              </Text>
-            )}
-            {selStart && selEnd && (
-              <Text style={{ fontSize: 13, fontWeight: "600", color: GREEN, textAlign: "center" }}>
-                {fmt(selStart)} → {fmt(selEnd)}
-                {!isCar ? ` · ${nights(selStart, selEnd)} night${nights(selStart, selEnd) !== 1 ? "s" : ""}` : ""}
-              </Text>
-            )}
-          </View>
-
-          {/* Time inputs for car rentals */}
-          {isCar && selStart && selEnd && (
-            <View style={{ paddingHorizontal: 20, paddingTop: 20, gap: 12 }}>
-              <Text style={{ fontSize: 15, fontWeight: "700", color: TEXT }}>Set Times</Text>
-              <View style={{ flexDirection: "row", gap: 12 }}>
-                <View style={{ flex: 1, backgroundColor: BG, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: BORDER }}>
-                  <Text style={{ fontSize: 12, color: MUTED, fontWeight: "600", marginBottom: 8 }}>Pickup time</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <TextInput
-                      value={pickupHr}
-                      onChangeText={v => setPickupHr(v.replace(/\D/g, "").slice(0, 2))}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      style={{ borderWidth: 1, borderColor: BORDER, borderRadius: 8, width: 44, textAlign: "center", paddingVertical: 8, fontSize: 16, fontWeight: "700", color: TEXT }}
-                    />
-                    <Text style={{ fontSize: 16, fontWeight: "700", color: TEXT }}>:</Text>
-                    <TextInput
-                      value={pickupMin}
-                      onChangeText={v => setPickupMin(v.replace(/\D/g, "").slice(0, 2))}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      style={{ borderWidth: 1, borderColor: BORDER, borderRadius: 8, width: 44, textAlign: "center", paddingVertical: 8, fontSize: 16, fontWeight: "700", color: TEXT }}
-                    />
-                  </View>
-                </View>
-                <View style={{ flex: 1, backgroundColor: BG, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: BORDER }}>
-                  <Text style={{ fontSize: 12, color: MUTED, fontWeight: "600", marginBottom: 8 }}>Return time</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <TextInput
-                      value={returnHr}
-                      onChangeText={v => setReturnHr(v.replace(/\D/g, "").slice(0, 2))}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      style={{ borderWidth: 1, borderColor: BORDER, borderRadius: 8, width: 44, textAlign: "center", paddingVertical: 8, fontSize: 16, fontWeight: "700", color: TEXT }}
-                    />
-                    <Text style={{ fontSize: 16, fontWeight: "700", color: TEXT }}>:</Text>
-                    <TextInput
-                      value={returnMin}
-                      onChangeText={v => setReturnMin(v.replace(/\D/g, "").slice(0, 2))}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      style={{ borderWidth: 1, borderColor: BORDER, borderRadius: 8, width: 44, textAlign: "center", paddingVertical: 8, fontSize: 16, fontWeight: "700", color: TEXT }}
-                    />
-                  </View>
-                </View>
-              </View>
-            </View>
-          )}
-        </ScrollView>
-
-        {/* Stays commit on the second date tap; only cars need a confirm step,
-            to lock in the pickup/return times above. */}
-        {isCar && (
-          <View style={{ paddingHorizontal: 20, paddingVertical: 16, borderTopWidth: 1, borderTopColor: BORDER }}>
-            <TouchableOpacity
-              style={{ backgroundColor: canConfirm ? GREEN : "#D1D5DB", borderRadius: 14, paddingVertical: 16, alignItems: "center" }}
-              onPress={handleConfirm}
-              disabled={!canConfirm}
-            >
-              <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" }}>Confirm dates &amp; times</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      </SafeAreaView>
-    </Modal>
-  );
+interface ListingAvailabilityData {
+  unavailableRanges?: { start: string; end: string }[];
+  roomTypeAvailability?: RoomTypeAvailability[];
 }
 
 // ── Main Screen ───────────────────────────────────────────────────────────────
@@ -626,6 +386,14 @@ export default function ListingDetailScreen() {
   // Room type selection state
   const [selectedRoomTypeId, setSelectedRoomTypeId] = useState<string | null>(null);
 
+  // Room type conflict modal state
+  const [roomTypeConflictModal, setRoomTypeConflictModal] = useState<{
+    targetRtId: string;
+    targetRtName: string;
+    currentRtName: string;
+    conflictDates: string;
+  } | null>(null);
+
   // ── Data ──
   const { data: listing, isLoading, isError, refetch: refetchListing } = useQuery<PublicListing>({
     // Prices are localized per currency by the API, so the currency is part of
@@ -639,10 +407,16 @@ export default function ListingDetailScreen() {
     enabled: !!id, staleTime: 0, gcTime: 5 * 60_000,
   });
 
-  const { data: availability, refetch: refetchAvailability } = useQuery({
+  const { data: availabilityData, refetch: refetchAvailability } = useQuery<ListingAvailabilityData>({
     queryKey: ["availability", id],
     queryFn: async () => {
-      const res = await listingApi.get<{ data: { unavailableRanges: { start: string; end: string }[] } }>(`/listings/${id}/availability`);
+      const today = new Date().toISOString().split("T")[0];
+      const future = new Date();
+      future.setFullYear(future.getFullYear() + 1);
+      const twelveMonths = future.toISOString().split("T")[0];
+      const res = await listingApi.get<{ data: ListingAvailabilityData }>(
+        `/listings/${id}/availability?start=${today}&end=${twelveMonths}`
+      );
       return res.data.data;
     },
     enabled: !!id,
@@ -821,13 +595,93 @@ export default function ListingDetailScreen() {
     ? Math.round(((promoted.originalPrice - promoted.discountedPrice) / promoted.originalPrice) * 100)
     : null;
 
-  // Locally selected dates take priority over URL params
-  const effectivePU = localStart ?? pickupDatetime;
-  const effectiveRT = localEnd ?? returnDatetime;
-  const effectiveCI = localStart ?? checkIn;
-  const effectiveCO = localEnd ?? checkOut;
+  // Locally selected dates take priority over URL params. Empty string means cleared.
+  const effectivePU = localStart !== null ? localStart : (pickupDatetime ?? "");
+  const effectiveRT = localEnd !== null ? localEnd : (returnDatetime ?? "");
+  const effectiveCI = localStart !== null ? localStart : (checkIn ?? "");
+  const effectiveCO = localEnd !== null ? localEnd : (checkOut ?? "");
 
   const hasDates = isCar ? !!(effectivePU && effectiveRT) : !!(effectiveCI && effectiveCO);
+
+  // Helper to get disabled dates for any room type
+  const getDisabledDatesForRoomType = useCallback((rtId: string): Set<string> => {
+    const set = new Set<string>();
+    if (!availabilityData) return set;
+    if (availabilityData.unavailableRanges && availabilityData.unavailableRanges.length > 0) {
+      expandRangesToDateSet(availabilityData.unavailableRanges).forEach((d) => set.add(d));
+    }
+    const rtAvail = availabilityData.roomTypeAvailability?.find((r) => r.roomTypeId === rtId);
+    if (rtAvail?.unavailableRanges && rtAvail.unavailableRanges.length > 0) {
+      expandRangesToDateSet(rtAvail.unavailableRanges).forEach((d) => set.add(d));
+    }
+    return set;
+  }, [availabilityData]);
+
+  // Current disabled dates scoped to current category & selected room type
+  const currentDisabledDates = useMemo(() => {
+    const set = new Set<string>();
+    if (!availabilityData) return set;
+    if (availabilityData.unavailableRanges && availabilityData.unavailableRanges.length > 0) {
+      expandRangesToDateSet(availabilityData.unavailableRanges).forEach((d) => set.add(d));
+    }
+    if (isHotel && selectedRoomTypeId && availabilityData.roomTypeAvailability?.length) {
+      const rtAvail = availabilityData.roomTypeAvailability.find((r) => r.roomTypeId === selectedRoomTypeId);
+      if (rtAvail?.unavailableRanges && rtAvail.unavailableRanges.length > 0) {
+        expandRangesToDateSet(rtAvail.unavailableRanges).forEach((d) => set.add(d));
+      }
+    }
+    return set;
+  }, [availabilityData, isHotel, selectedRoomTypeId]);
+
+  // Set of room type IDs that conflict with the current dates
+  const unavailableRoomTypeIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!effectiveCI || !effectiveCO || !roomTypes.length) return set;
+    for (const rt of roomTypes) {
+      const rtDisabled = getDisabledDatesForRoomType(rt.id);
+      if (hasBookedNightInRange(effectiveCI, effectiveCO, rtDisabled)) {
+        set.add(rt.id);
+      }
+    }
+    return set;
+  }, [effectiveCI, effectiveCO, roomTypes, getDisabledDatesForRoomType]);
+
+  // Check if current date selection conflicts with listing or selected room type
+  const isCurrentSelectionConflicted = useMemo(() => {
+    if (isCar) {
+      if (!effectivePU || !effectiveRT || currentDisabledDates.size === 0) return false;
+      const puDate = effectivePU.split("T")[0]!;
+      const rtDate = effectiveRT.split("T")[0]!;
+      return hasBookedNightInRange(puDate, rtDate, currentDisabledDates);
+    }
+    if (!effectiveCI || !effectiveCO || currentDisabledDates.size === 0) return false;
+    return hasBookedNightInRange(effectiveCI, effectiveCO, currentDisabledDates);
+  }, [isCar, effectivePU, effectiveRT, effectiveCI, effectiveCO, currentDisabledDates]);
+
+  // Handle switching room types with intelligent availability checking
+  function handleSelectRoomType(targetId: string) {
+    if (targetId === selectedRoomTypeId) return;
+
+    const targetRt = roomTypes.find((r) => r.id === targetId);
+    const targetName = targetRt?.name || targetRt?.roomType?.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) || "Selected Room";
+    const currentName = selectedRoomType?.name || selectedRoomType?.roomType?.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) || "Current Room";
+
+    if (effectiveCI && effectiveCO) {
+      const targetDisabled = getDisabledDatesForRoomType(targetId);
+      const isConflicted = hasBookedNightInRange(effectiveCI, effectiveCO, targetDisabled);
+      if (isConflicted) {
+        setRoomTypeConflictModal({
+          targetRtId: targetId,
+          targetRtName: targetName,
+          currentRtName: currentName,
+          conflictDates: `${fmt(effectiveCI)} – ${fmt(effectiveCO)}`,
+        });
+        return;
+      }
+    }
+
+    setSelectedRoomTypeId(targetId);
+  }
 
   const datesStr = (() => {
     if (isCar && effectivePU && effectiveRT) {
@@ -843,7 +697,7 @@ export default function ListingDetailScreen() {
 
   // Pricing
   const pricingBreakout = (() => {
-    if (!hasDates || !baseRate) return null;
+    if (!hasDates || !baseRate || isCurrentSelectionConflicted) return null;
     const count = isCar && effectivePU && effectiveRT ? days(effectivePU, effectiveRT)
       : !isCar && effectiveCI && effectiveCO ? nights(effectiveCI, effectiveCO) : 1;
     const originalSubtotal = baseRate * count;
@@ -992,6 +846,10 @@ export default function ListingDetailScreen() {
 
   function goToBooking() {
     if (!listing) return;
+    if (isCurrentSelectionConflicted) {
+      setShowDatePicker(true);
+      return;
+    }
     if (isCar) {
       router.push({
         pathname: "/book/[listingId]",
@@ -1023,6 +881,10 @@ export default function ListingDetailScreen() {
 
   function handleBook() {
     if (!listing) return;
+    if (isCurrentSelectionConflicted) {
+      setShowDatePicker(true);
+      return;
+    }
     // Booking without an account is supported — an anonymous token is minted
     // at the start of the checkout flow. Signing in is still offered first,
     // because a booking made under an account shows up in Trips and can be
@@ -1219,9 +1081,10 @@ export default function ListingDetailScreen() {
             <RoomTypeSelector
               roomTypes={roomTypes}
               selectedRoomTypeId={selectedRoomTypeId}
-              onSelectRoomType={(rtId) => setSelectedRoomTypeId(rtId)}
+              onSelectRoomType={handleSelectRoomType}
               currency={curr}
               discountPercent={discountPercent}
+              unavailableRoomTypeIds={unavailableRoomTypeIds}
             />
           </View>
         )}
@@ -1269,10 +1132,37 @@ export default function ListingDetailScreen() {
         <View style={s.section}>
           <Text style={s.sectionTitle}>Your {isCar ? "Rental Period" : "Stay"}</Text>
           {datesStr ? (
-            <View style={s.datesPill}>
-              <Ionicons name="calendar-outline" size={16} color={GREEN} />
-              <Text style={s.datesText}>{datesStr}</Text>
-            </View>
+            <TouchableOpacity
+              style={[
+                s.datesPill,
+                isCurrentSelectionConflicted && { backgroundColor: "#FEF2F2", borderColor: "#FECACA" },
+              ]}
+              onPress={() => setShowDatePicker(true)}
+              activeOpacity={0.8}
+            >
+              <Ionicons
+                name={isCurrentSelectionConflicted ? "alert-circle" : "calendar-outline"}
+                size={16}
+                color={isCurrentSelectionConflicted ? "#DC2626" : GREEN}
+              />
+              <Text
+                style={[
+                  s.datesText,
+                  isCurrentSelectionConflicted && { color: "#DC2626" },
+                ]}
+              >
+                {datesStr}
+              </Text>
+              {isCurrentSelectionConflicted ? (
+                <Text style={{ fontSize: 11, fontWeight: "700", color: "#DC2626", marginLeft: 4 }}>
+                  (Unavailable)
+                </Text>
+              ) : (
+                <Text style={{ fontSize: 11, fontWeight: "600", color: GREEN, marginLeft: "auto" }}>
+                  Change
+                </Text>
+              )}
+            </TouchableOpacity>
           ) : (
             <TouchableOpacity style={s.selectDatesCard} onPress={() => setShowDatePicker(true)}>
               <Ionicons name="calendar-outline" size={20} color={GREEN} />
@@ -1500,13 +1390,72 @@ export default function ListingDetailScreen() {
       </Modal>
 
       {/* ══ DATE PICKER MODAL ══ */}
-      <CalendarPicker
+      <DateRangePickerModal
         visible={showDatePicker}
         onClose={() => setShowDatePicker(false)}
-        onConfirm={(start, end) => { setLocalStart(start); setLocalEnd(end); }}
+        onConfirm={(start, end) => {
+          setLocalStart(start);
+          setLocalEnd(end);
+        }}
+        initialStartDate={localStart !== null ? (localStart || null) : (isCar ? (pickupDatetime?.split("T")[0] ?? null) : (checkIn ?? null))}
+        initialEndDate={localEnd !== null ? (localEnd || null) : (isCar ? (returnDatetime?.split("T")[0] ?? null) : (checkOut ?? null))}
         isCar={isCar}
-        unavailableRanges={availability?.unavailableRanges ?? []}
+        disabledDates={currentDisabledDates}
       />
+
+      {/* ══ ROOM TYPE CONFLICT MODAL ══ */}
+      <Modal
+        visible={!!roomTypeConflictModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRoomTypeConflictModal(null)}
+      >
+        <View style={s.modalOverlay}>
+          <View style={s.modalCard}>
+            <View style={s.modalWarningIcon}>
+              <Ionicons name="warning" size={26} color="#D97706" />
+            </View>
+
+            <Text style={s.modalTitle}>
+              {roomTypeConflictModal?.targetRtName} Unavailable
+            </Text>
+
+            <Text style={s.modalBody}>
+              The <Text style={{ fontWeight: "700", color: TEXT }}>{roomTypeConflictModal?.targetRtName}</Text> is fully booked for your selected dates (<Text style={{ fontWeight: "600", color: TEXT }}>{roomTypeConflictModal?.conflictDates}</Text>).
+            </Text>
+
+            <Text style={s.modalSubBody}>
+              Would you like to switch to <Text style={{ fontWeight: "600", color: TEXT }}>{roomTypeConflictModal?.targetRtName}</Text> and choose different dates, or keep your dates with <Text style={{ fontWeight: "600", color: TEXT }}>{roomTypeConflictModal?.currentRtName}</Text>?
+            </Text>
+
+            <View style={s.modalBtnRow}>
+              <TouchableOpacity
+                style={s.modalPrimaryBtn}
+                onPress={() => {
+                  if (!roomTypeConflictModal) return;
+                  const targetId = roomTypeConflictModal.targetRtId;
+                  setRoomTypeConflictModal(null);
+                  setSelectedRoomTypeId(targetId);
+                  setLocalStart("");
+                  setLocalEnd("");
+                  setShowDatePicker(true);
+                }}
+                activeOpacity={0.85}
+              >
+                <Text style={s.modalPrimaryBtnText}>Choose New Dates</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={s.modalSecondaryBtn}
+                onPress={() => setRoomTypeConflictModal(null)}
+                activeOpacity={0.85}
+              >
+                <Text style={s.modalSecondaryBtnText}>Keep Current Dates</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* ══ STICKY BOTTOM BAR ══ */}
       <View style={[s.stickyBar, { paddingBottom: Math.max(insets.bottom + 10, 18) }]}>
@@ -1547,6 +1496,15 @@ export default function ListingDetailScreen() {
         ) : !hasDates ? (
           <TouchableOpacity style={s.selectDatesBtn} onPress={() => setShowDatePicker(true)}>
             <Text style={s.selectDatesBtnText}>Select dates</Text>
+          </TouchableOpacity>
+        ) : isCurrentSelectionConflicted ? (
+          <TouchableOpacity
+            style={s.datesConflictBtn}
+            onPress={() => setShowDatePicker(true)}
+            activeOpacity={0.88}
+          >
+            <Ionicons name="calendar" size={15} color="#B45309" />
+            <Text style={s.datesConflictBtnText}>Dates unavailable · Change</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity style={s.bookBtn} onPress={handleBook} activeOpacity={0.88}>
@@ -1696,7 +1654,103 @@ const s = StyleSheet.create({
     fontWeight: "700",
     color: GREEN,
   },
-
+  datesConflictBtn: {
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  datesConflictBtnText: {
+    color: "#92400E",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.55)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  modalCard: {
+    backgroundColor: "#fff",
+    borderRadius: 22,
+    padding: 24,
+    width: "100%",
+    maxWidth: 380,
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  modalWarningIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#FEF3C7",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: TEXT,
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  modalBody: {
+    fontSize: 14,
+    color: MUTED,
+    textAlign: "center",
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  modalSubBody: {
+    fontSize: 12,
+    color: MUTED,
+    textAlign: "center",
+    lineHeight: 18,
+    marginBottom: 20,
+  },
+  modalBtnRow: {
+    width: "100%",
+    gap: 10,
+  },
+  modalPrimaryBtn: {
+    backgroundColor: "#0c2614",
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalPrimaryBtnText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  modalSecondaryBtn: {
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 14,
+    paddingVertical: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#F9FAFB",
+  },
+  modalSecondaryBtnText: {
+    color: TEXT,
+    fontSize: 14,
+    fontWeight: "600",
+  },
 });
 
 const pr = StyleSheet.create({
