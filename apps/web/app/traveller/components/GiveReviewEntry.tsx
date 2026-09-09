@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { Star } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { cn, formatDate } from "@/lib/utils";
+import { listingApi } from "@/lib/listing-api";
 import { readLatestReviewContext, type LatestReviewContext } from "@/services/traveller";
 
 interface GiveReviewEntryProps {
@@ -23,12 +25,70 @@ export function GiveReviewEntry({ listingId, listingName, className }: GiveRevie
     setContext(readLatestReviewContext());
   }, [listingId]);
 
+  const hasFutureContextCheckout = Boolean(
+    context?.checkOutDate && new Date(context.checkOutDate).getTime() > Date.now(),
+  );
+
+  // Validate the actual booking from the backend to ensure:
+  // 1. The booking status is 'completed'
+  // 2. The checkout date has actually passed
+  // 3. The booking has not already been reviewed
+  const { data: booking, isLoading } = useQuery({
+    queryKey: ["review-entry-booking", context?.bookingId],
+    queryFn: async () => {
+      if (!context?.bookingId) return null;
+      try {
+        const res = await listingApi.get(`/guests/me/bookings/${context.bookingId}`);
+        return res.data?.data ?? null;
+      } catch {
+        return null;
+      }
+    },
+    enabled: Boolean(
+      context?.bookingId &&
+      context.listingId === listingId &&
+      !hasFutureContextCheckout,
+    ),
+    staleTime: 30_000,
+  });
+
   if (!context || context.listingId !== listingId) {
     return null;
   }
 
-  const resolvedListingName = listingName ?? context.listingName ?? "";
+  // If the stored context checkout date is in the future, don't show the card
+  if (hasFutureContextCheckout) {
+    return null;
+  }
+
+  // While loading booking data, hide the card to prevent premature flashing
+  if (isLoading || !booking) {
+    return null;
+  }
+
+  // Reviews can only be submitted for bookings whose checkout date has passed and are completed
+  if (booking.status !== "completed") {
+    return null;
+  }
+
+  const checkoutRaw = booking.returnDatetime || booking.checkOut || context.checkOutDate;
+  if (!checkoutRaw) {
+    return null;
+  }
+
+  const checkoutTime = new Date(checkoutRaw).getTime();
+  if (isNaN(checkoutTime) || Date.now() < checkoutTime) {
+    return null;
+  }
+
+  // If already reviewed, do not show prompt again
+  if (booking.hasReview) {
+    return null;
+  }
+
+  const resolvedListingName = listingName ?? context.listingName ?? booking.listing?.title ?? "";
   const reviewUrl = `/traveller/reviews?bookingId=${encodeURIComponent(context.bookingId)}&listingId=${encodeURIComponent(listingId)}${resolvedListingName ? `&listingName=${encodeURIComponent(resolvedListingName)}` : ""}`;
+  const displayCompletedDate = booking.completedAt || checkoutRaw;
 
   return (
     <Card
@@ -58,7 +118,7 @@ export function GiveReviewEntry({ listingId, listingName, className }: GiveRevie
           <div className="flex flex-wrap gap-2 text-xs text-slate-500">
             <span>Booking {context.bookingId.slice(0, 8).toUpperCase()}</span>
             <span>·</span>
-            <span>Completed {formatDate(context.completedAt)}</span>
+            <span>Completed {formatDate(displayCompletedDate)}</span>
           </div>
           <Button variant="success" className="w-full sm:w-auto" onClick={() => router.push(reviewUrl)}>
             Leave a review

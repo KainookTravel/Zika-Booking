@@ -515,11 +515,13 @@ export default function BookingReviewPage() {
           paymentResolvedRef.current = true;
           const txId = res.data?.data?.transactionId ?? res.data?.data?.transaction_id ?? pmId;
           const displayId = res.data?.data?.displayId as string | undefined;
+          const scheduledCheckout = ctx?.returnDatetime || ctx?.checkOut;
           storeLatestReviewContext({
             bookingId: reviewBookingId,
             listingId: ctx!.listingId,
             listingName: ctx!.listingTitle,
-            completedAt: new Date().toISOString(),
+            checkOutDate: scheduledCheckout,
+            completedAt: scheduledCheckout,
           });
           setConfirmed({
             reference: ref,

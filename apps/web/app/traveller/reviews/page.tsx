@@ -16,6 +16,7 @@ import { Input, Textarea } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { RatingStars } from "@/components/charts/Charts";
 import { cn, formatDate } from "@/lib/utils";
+import { listingApi } from "@/lib/listing-api";
 import {
   clearLatestReviewContext,
   fetchMyReviews,
@@ -206,7 +207,29 @@ export default function TravellerReviewsPage() {
   const bookingId = queryContext.bookingId || latestContext?.bookingId || "";
   const listingId = queryContext.listingId || latestContext?.listingId || "";
   const listingName = queryContext.listingName || latestContext?.listingName || "";
-  const canReview = Boolean(bookingId);
+
+  const { data: targetBooking, isLoading: isTargetBookingLoading } = useQuery({
+    queryKey: ["traveller-review-target-booking", bookingId],
+    queryFn: async () => {
+      if (!bookingId) return null;
+      try {
+        const res = await listingApi.get(`/guests/me/bookings/${bookingId}`);
+        return res.data?.data ?? null;
+      } catch {
+        return null;
+      }
+    },
+    enabled: Boolean(bookingId),
+    staleTime: 30_000,
+  });
+
+  const checkoutRaw = targetBooking?.returnDatetime || targetBooking?.checkOut;
+  const isPastCheckout = checkoutRaw ? new Date(checkoutRaw).getTime() <= Date.now() : false;
+  const isCompleted = targetBooking?.status === "completed";
+  const alreadyReviewed = Boolean(targetBooking?.hasReview);
+  const isEligibleToReview = Boolean(bookingId && isCompleted && isPastCheckout && !alreadyReviewed);
+  const isUpcomingOrActive = Boolean(bookingId && targetBooking && (!isCompleted || !isPastCheckout));
+  const canReview = isEligibleToReview;
 
   const submitMutation = useMutation({
     mutationFn: submitTravellerReview,
@@ -297,8 +320,14 @@ export default function TravellerReviewsPage() {
               title="Leave a review"
               subtitle="Completed bookings only, and the booking link is kept locally after checkout."
             />
-
-            {canReview ? (
+            {isTargetBookingLoading ? (
+              <div className="space-y-4 py-4">
+                <Skeleton className="h-20 w-full rounded-2xl" />
+                <Skeleton className="h-12 w-full rounded-xl" />
+                <Skeleton className="h-10 w-full rounded-xl" />
+                <Skeleton className="h-28 w-full rounded-xl" />
+              </div>
+            ) : canReview ? (
               <form className="space-y-4" onSubmit={handleSubmit}>
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
@@ -361,6 +390,46 @@ export default function TravellerReviewsPage() {
                   Reviews are only accepted for completed bookings within the backend review window. If your booking is too old or already reviewed, the API will reject the submission.
                 </div>
               </form>
+            ) : isUpcomingOrActive ? (
+              <div className="space-y-4 py-2">
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-800">Booking</p>
+                      <p className="mt-1 font-mono text-sm font-semibold text-slate-950">{shortId(bookingId)}</p>
+                    </div>
+                    <Badge label={targetBooking?.status === "confirmed" ? "Upcoming" : targetBooking?.status ?? "Active"} variant="warning" />
+                  </div>
+                  <h4 className="mt-4 text-sm font-bold text-slate-950">Review opens after checkout</h4>
+                  <p className="mt-1.5 text-xs leading-5 text-slate-600">
+                    {checkoutRaw
+                      ? `This booking is scheduled for checkout on ${formatDate(checkoutRaw)}. Reviews can only be submitted once your stay or rental is completed.`
+                      : "Reviews can only be submitted once your stay or rental is completed."}
+                  </p>
+                </div>
+                <Button variant="outline" className="w-full" onClick={() => router.push("/traveller")}>
+                  View all bookings
+                </Button>
+              </div>
+            ) : alreadyReviewed ? (
+              <div className="space-y-4 py-2">
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-800">Booking</p>
+                      <p className="mt-1 font-mono text-sm font-semibold text-slate-950">{shortId(bookingId)}</p>
+                    </div>
+                    <Badge label="Reviewed" variant="success" />
+                  </div>
+                  <h4 className="mt-4 text-sm font-bold text-slate-950">Review already submitted</h4>
+                  <p className="mt-1.5 text-xs leading-5 text-slate-600">
+                    You have already submitted a review for this booking. You can view it in the list on the right.
+                  </p>
+                </div>
+                <Button variant="outline" className="w-full" onClick={() => router.push("/traveller")}>
+                  View all bookings
+                </Button>
+              </div>
             ) : (
               <div className="flex min-h-[420px] flex-col items-center justify-center text-center">
                 <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
@@ -368,14 +437,14 @@ export default function TravellerReviewsPage() {
                 </div>
                 <p className="mt-4 font-semibold text-slate-950">No review link available</p>
                 <p className="mt-1 max-w-sm text-sm leading-6 text-slate-500">
-                  Open this page from a checkout confirmation or a review link from your most recent completed booking.
+                  Open this page from a review link from your most recent completed booking after checkout.
                 </p>
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
                   <Button variant="outline" onClick={() => router.push("/")}>
                     Browse listings
                   </Button>
-                  <Button variant="ghost" onClick={() => router.push("/traveller/messages")}>
-                    Open messages
+                  <Button variant="outline" onClick={() => router.push("/traveller")}>
+                    My Bookings
                   </Button>
                 </div>
               </div>

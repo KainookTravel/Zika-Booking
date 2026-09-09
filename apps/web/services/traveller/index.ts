@@ -173,7 +173,8 @@ export interface LatestReviewContext {
   bookingId: string;
   listingId: string;
   listingName?: string;
-  completedAt: string;
+  completedAt?: string;
+  checkOutDate?: string;
 }
 
 export function readLatestReviewContext(): LatestReviewContext | null {
@@ -189,7 +190,8 @@ export function readLatestReviewContext(): LatestReviewContext | null {
       bookingId: parsed.bookingId!,
       listingId: parsed.listingId!,
       listingName: readString(parsed.listingName) ?? undefined,
-      completedAt: readString(parsed.completedAt) ?? new Date().toISOString(),
+      completedAt: readString(parsed.completedAt) ?? undefined,
+      checkOutDate: readString(parsed.checkOutDate) ?? undefined,
     };
   } catch {
     return null;
