@@ -23,7 +23,7 @@ import { isPromotionValid } from "./utils/promo-utils";
 import PhotoGallery from "./components/PhotoGallery";
 import ReservationCard from "./components/ReservationCard";
 import MapView from "./components/MapView";
-import DateRangePicker from "./components/DateRangePicker";
+import DateRangePicker, { fmtDisplayDate } from "./components/DateRangePicker";
 import PriceRangeFields from "./components/PriceRangeFields";
 import type { PublicListingDetail } from "@/types";
 import { isTaraCountry } from "@zika/types";
@@ -52,6 +52,50 @@ function formatCountryName(c: string): string {
     if (match) return match.name;
   }
   return trimmed;
+}
+
+function parseDateStr(str: string): Date {
+  const [y, m, d] = str.split("-").map(Number);
+  return new Date(y!, m! - 1, d!);
+}
+
+function expandRangesToDateSet(ranges: { start: string; end: string }[]): Set<string> {
+  const dates = new Set<string>();
+  for (const r of ranges) {
+    if (!r.start || !r.end) continue;
+    try {
+      const cur = parseDateStr(r.start);
+      const end = parseDateStr(r.end);
+      while (cur <= end) {
+        const y = cur.getFullYear();
+        const m = String(cur.getMonth() + 1).padStart(2, "0");
+        const d = String(cur.getDate()).padStart(2, "0");
+        dates.add(`${y}-${m}-${d}`);
+        cur.setDate(cur.getDate() + 1);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return dates;
+}
+
+function hasBookedNightInRange(startStr: string, endStr: string, disabledSet: Set<string>): boolean {
+  if (!startStr || !endStr || disabledSet.size === 0) return false;
+  try {
+    const cur = parseDateStr(startStr);
+    const end = parseDateStr(endStr);
+    while (cur < end) {
+      const y = cur.getFullYear();
+      const m = String(cur.getMonth() + 1).padStart(2, "0");
+      const d = String(cur.getDate()).padStart(2, "0");
+      if (disabledSet.has(`${y}-${m}-${d}`)) return true;
+      cur.setDate(cur.getDate() + 1);
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 // Accent-insensitive matching: strips diacritics so "makepe" matches "Maképé".
@@ -354,6 +398,22 @@ export default function TravellerDashboard() {
 
   // Availability check state
   const [availabilityStatus, setAvailabilityStatus] = useState<"checking" | "available" | "unavailable" | null>(null);
+  const [roomTypeAvailabilities, setRoomTypeAvailabilities] = useState<{
+    roomTypeId: string;
+    roomType: string;
+    name: string;
+    unitCount: number;
+    unavailableRanges: { start: string; end: string }[];
+  }[]>([]);
+  const [generalUnavailableRanges, setGeneralUnavailableRanges] = useState<{ start: string; end: string }[]>([]);
+  const [autoOpenDetailCalendar, setAutoOpenDetailCalendar] = useState(false);
+  const [roomTypeConflictModal, setRoomTypeConflictModal] = useState<{
+    isOpen: boolean;
+    currentRtName: string;
+    targetRtId: string;
+    targetRtName: string;
+    conflictDates: string;
+  } | null>(null);
 
   // Voucher state
   const [voucherCode, setVoucherCode] = useState<string>("");
@@ -994,6 +1054,66 @@ export default function TravellerDashboard() {
     if (selectedListingId && !lockToken) handleSelectListing(selectedListingId);
   }, [currency]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Disabled dates for DateRangePicker in listing detail based on room type / listing availability
+  const detailDisabledDates = React.useMemo(() => {
+    if (!detailListing) return new Set<string>();
+
+    if (detailListing.category === "hotel") {
+      if (selectedRoomTypeId) {
+        const rt = roomTypeAvailabilities.find((r) => r.roomTypeId === selectedRoomTypeId);
+        return expandRangesToDateSet(rt?.unavailableRanges ?? []);
+      }
+      if (roomTypeAvailabilities.length > 0) {
+        const allSets = roomTypeAvailabilities.map((rt) => expandRangesToDateSet(rt.unavailableRanges));
+        const intersection = new Set<string>();
+        const first = allSets[0];
+        if (first) {
+          for (const date of first) {
+            if (allSets.every((s) => s.has(date))) {
+              intersection.add(date);
+            }
+          }
+        }
+        return intersection;
+      }
+      return new Set<string>();
+    }
+
+    return expandRangesToDateSet(generalUnavailableRanges);
+  }, [detailListing, selectedRoomTypeId, roomTypeAvailabilities, generalUnavailableRanges]);
+
+  function handleRoomTypeChange(newRtId: string | null) {
+    if (!newRtId) {
+      setSelectedRoomTypeId(null);
+      return;
+    }
+
+    const start = detailCheckIn;
+    const end = detailCheckOut;
+
+    if (start && end && detailListing?.category === "hotel") {
+      const targetRt = (detailListing.roomTypes ?? []).find((rt) => rt.id === newRtId);
+      const currentRt = (detailListing.roomTypes ?? []).find((rt) => rt.id === selectedRoomTypeId);
+
+      const targetRtAvail = roomTypeAvailabilities.find((r) => r.roomTypeId === newRtId);
+      const targetDisabledSet = expandRangesToDateSet(targetRtAvail?.unavailableRanges ?? []);
+
+      const hasConflict = hasBookedNightInRange(start, end, targetDisabledSet);
+      if (hasConflict) {
+        setRoomTypeConflictModal({
+          isOpen: true,
+          currentRtName: currentRt?.name || "current room",
+          targetRtId: newRtId,
+          targetRtName: targetRt?.name || "selected room",
+          conflictDates: `${fmtDisplayDate(start)} – ${fmtDisplayDate(end)}`,
+        });
+        return;
+      }
+    }
+
+    setSelectedRoomTypeId(newRtId);
+  }
+
   // Fetch wallet vouchers for the personal banner as soon as the user is authenticated
   useEffect(() => {
     if (hasAuthToken) fetchWalletVouchers();
@@ -1530,6 +1650,27 @@ export default function TravellerDashboard() {
         };
         setDetailListing(details);
 
+        // Fetch full listing availability for calendar date disabling across next 12 months
+        listingApi
+          .get<any>(`/listings/${id}/availability`, {
+            params: {
+              start: getTodayString(),
+              end: (() => {
+                const d = new Date();
+                d.setFullYear(d.getFullYear() + 1);
+                return d.toISOString().slice(0, 10);
+              })(),
+            },
+          })
+          .then((res) => {
+            if (res.data?.success) {
+              const d = res.data.data ?? {};
+              setRoomTypeAvailabilities(d.roomTypeAvailability ?? []);
+              setGeneralUnavailableRanges(d.unavailableRanges ?? []);
+            }
+          })
+          .catch(() => {});
+
         let cheapestRtId: string | null = null;
         if (details.category === "hotel" && details.roomTypes && details.roomTypes.length > 0) {
           const activeRts = details.roomTypes.filter((rt) => rt.isActive !== false);
@@ -1553,6 +1694,9 @@ export default function TravellerDashboard() {
         fetchAllPricing();
       } else {
         setDetailListing(null);
+        setRoomTypeAvailabilities([]);
+        setGeneralUnavailableRanges([]);
+        setRoomTypeConflictModal(null);
       }
     } catch (err: any) {
       const code = err?.response?.data?.error?.code;
@@ -1564,6 +1708,9 @@ export default function TravellerDashboard() {
         return;
       }
       setDetailListing(null);
+      setRoomTypeAvailabilities([]);
+      setGeneralUnavailableRanges([]);
+      setRoomTypeConflictModal(null);
     } finally {
       setLoadingDetail(false);
     }
@@ -2723,6 +2870,7 @@ export default function TravellerDashboard() {
                                     setDetailReturnDate(end);
                                   }}
                                   minDate={getTodayString()}
+                                  disabledDates={detailDisabledDates}
                                 />
                               ) : (
                                 <>
@@ -2733,8 +2881,14 @@ export default function TravellerDashboard() {
                                     onChange={(start, end) => {
                                       setDetailCheckIn(start);
                                       setDetailCheckOut(end);
+                                      setAutoOpenDetailCalendar(false);
                                     }}
                                     minDate={getTodayString()}
+                                    disabledDates={detailDisabledDates}
+                                    forceOpen={autoOpenDetailCalendar}
+                                    onOpenChange={(open) => {
+                                      if (!open) setAutoOpenDetailCalendar(false);
+                                    }}
                                   />
                                   <div className="border border-slate-200 rounded-xl p-3 bg-slate-50">
                                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Guests</p>
@@ -2791,7 +2945,7 @@ export default function TravellerDashboard() {
                                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Room Type</p>
                                 <select
                                   value={selectedRoomTypeId || ""}
-                                  onChange={(e) => setSelectedRoomTypeId(e.target.value || null)}
+                                  onChange={(e) => handleRoomTypeChange(e.target.value || null)}
                                   className="w-full mt-1 text-sm bg-transparent outline-none font-semibold text-slate-800"
                                 >
                                   {detailListing.roomTypes
@@ -5035,6 +5189,54 @@ export default function TravellerDashboard() {
               >
                 Sign In
               </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Room Type Availability Conflict Modal ── */}
+      {roomTypeConflictModal?.isOpen && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 text-left border border-slate-100 animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mb-4">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-bold text-slate-900 font-serif">
+              {roomTypeConflictModal.targetRtName} Unavailable
+            </h3>
+            <p className="text-sm text-slate-600 mt-2 leading-relaxed">
+              The <strong className="text-slate-900">{roomTypeConflictModal.targetRtName}</strong> is fully booked for your selected dates (<span className="font-semibold text-slate-800">{roomTypeConflictModal.conflictDates}</span>).
+            </p>
+            <p className="text-xs text-slate-500 mt-2">
+              Would you like to switch to <strong className="text-slate-700">{roomTypeConflictModal.targetRtName}</strong> and choose different dates, or keep your dates with <strong className="text-slate-700">{roomTypeConflictModal.currentRtName}</strong>?
+            </p>
+
+            <div className="mt-6 flex flex-col sm:flex-row gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  const targetId = roomTypeConflictModal.targetRtId;
+                  setRoomTypeConflictModal(null);
+                  setSelectedRoomTypeId(targetId);
+                  setDetailCheckIn("");
+                  setDetailCheckOut("");
+                  setAutoOpenDetailCalendar(true);
+                }}
+                className="flex-1 py-3 px-4 rounded-xl bg-[#0c2614] hover:bg-[#1D8D2B] text-white text-xs font-bold transition shadow-md hover:shadow-lg text-center cursor-pointer"
+              >
+                Choose New Dates
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRoomTypeConflictModal(null);
+                }}
+                className="flex-1 py-3 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold transition text-center cursor-pointer"
+              >
+                Keep Current Dates
+              </button>
             </div>
           </div>
         </div>
