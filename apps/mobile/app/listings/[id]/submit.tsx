@@ -100,7 +100,7 @@ export default function SubmitListingScreen() {
     },
     { label: "Vehicle registration doc", ok: docTypes.includes("vehicle_registration") },
     { label: "Insurance certificate", ok: docTypes.includes("insurance_certificate") },
-    { label: "At least 1 photo", ok: photoCount > 0 },
+    { label: `At least 3 photos (${photoCount} uploaded)`, ok: photoCount >= 3 },
   ];
 
   const checklist = isCar ? carChecklist : isApartment ? apartmentChecklist : hotelChecklist;

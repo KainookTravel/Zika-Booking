@@ -10,6 +10,7 @@ import {
   Platform,
   BackHandler,
   Keyboard,
+  TouchableOpacity,
 } from "react-native";
 import { useLocalSearchParams, router } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,6 +23,7 @@ import {
   FormField,
   SectionHeader,
   InfoBanner,
+  PayoutCurrencyWarning,
   SwitchRow,
   SelectField,
   CountryPickerButton,
@@ -35,6 +37,7 @@ import {
 import { LocationPicker } from "../../components/maps/LocationPicker";
 import { RoomTypesSection, useRoomTypes } from "./_room-types";
 import { useListingMedia } from "./_media";
+import { useAuthStore } from "../../store/auth";
 import {
   CANCELLATION_POLICIES,
   groupAmenities,
@@ -44,6 +47,7 @@ import {
   trimOrNull,
   countryOrNull,
   apiErrorMessage,
+  getCurrencyForCountry,
 } from "./_web-parity";
 
 /**
@@ -105,24 +109,24 @@ type FormErrors = Partial<Record<keyof HotelState | "photos" | "documents" | "ro
 
 function initState(l: any): HotelState {
   return {
-    name: l.name ?? "",
-    description: l.description ?? "",
-    address: l.address ?? "",
-    lat: l.lat ?? null,
-    lng: l.lng ?? null,
-    town: l.town ?? "",
-    neighborhood: l.neighborhood ?? "",
-    country: l.country ?? "",
-    currency: l.currency ?? "USD",
-    minStayNights: l.minStayNights ? String(l.minStayNights) : "1",
-    checkinTime: l.checkinTime ?? "14:00",
-    checkoutTime: l.checkoutTime ?? "11:00",
-    cancellationPolicy: l.cancellationPolicy ?? "flexible",
-    smokingAllowed: l.smokingAllowed ?? false,
-    petsAllowed: l.petsAllowed ?? false,
-    allowPreBooking: l.allowPreBooking ?? false,
-    selectedAmenities: flattenGroupedAmenities(l.amenities),
-    customAmenities: (l.customAmenities ?? [])
+    name: l?.name ?? "",
+    description: l?.description ?? "",
+    address: l?.address ?? "",
+    lat: l?.lat ?? null,
+    lng: l?.lng ?? null,
+    town: l?.town ?? "",
+    neighborhood: l?.neighborhood ?? "",
+    country: l?.country ?? "",
+    currency: l?.currency ?? "USD",
+    minStayNights: l?.minStayNights ? String(l.minStayNights) : "1",
+    checkinTime: l?.checkinTime ?? "14:00",
+    checkoutTime: l?.checkoutTime ?? "11:00",
+    cancellationPolicy: l?.cancellationPolicy ?? "flexible",
+    smokingAllowed: l?.smokingAllowed ?? false,
+    petsAllowed: l?.petsAllowed ?? false,
+    allowPreBooking: l?.allowPreBooking ?? false,
+    selectedAmenities: flattenGroupedAmenities(l?.amenities),
+    customAmenities: (l?.customAmenities ?? [])
       .map((a: any) => (typeof a === "string" ? a : (a?.label ?? "")))
       .filter(Boolean),
   };
@@ -165,12 +169,16 @@ function buildPayload(s: HotelState): Record<string, unknown> {
 // ── Screen ──────────────────────────────────────────────────────────────────
 
 export default function HotelWizard() {
-  const { id } = useLocalSearchParams<{ id?: string }>();
-  const listingId = String(id ?? "");
+  const params = useLocalSearchParams<{ id?: string }>();
+  const rawId = params.id;
+  const listingId = (Array.isArray(rawId) ? rawId[0] : rawId) ?? "";
+
   const qc = useQueryClient();
+  const providerCountry = useAuthStore((st) => st.user?.country);
 
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [countryModalOpen, setCountryModalOpen] = useState(false);
   const [customAmenityInput, setCustomAmenityInput] = useState("");
@@ -182,7 +190,7 @@ export default function HotelWizard() {
   const media = useListingMedia(listingId);
   const { data: roomTypes = [] } = useRoomTypes(listingId);
 
-  const { data: listing, isLoading } = useQuery({
+  const { data: listing, isLoading, isError } = useQuery({
     queryKey: ["listing", listingId],
     queryFn: async () => {
       const res = await listingApi.get<{ data: any }>(`/listings/${listingId}`);
@@ -190,6 +198,8 @@ export default function HotelWizard() {
     },
     enabled: !!listingId,
   });
+
+  const status = listing?.status ?? "draft";
 
   // Hydrate once per listing load; re-hydrating on every refetch would wipe
   // unsaved edits mid-wizard.
@@ -235,6 +245,10 @@ export default function HotelWizard() {
   function selectCountry(c: CountryData) {
     setSelectedCountry(c);
     set("country", c.code);
+    const detectedCurrency = getCurrencyForCountry(c.code);
+    if (detectedCurrency) {
+      set("currency", detectedCurrency);
+    }
   }
 
   // ── Validation — port of web validateStep ─────────────────────────────────
@@ -277,6 +291,16 @@ export default function HotelWizard() {
     }
   }
 
+  async function handleSaveDraft() {
+    setSavingDraft(true);
+    const ok = await saveAll();
+    setSavingDraft(false);
+    if (ok) {
+      qc.invalidateQueries({ queryKey: ["myListings"] });
+      Alert.alert("Draft Saved", "Your listing progress has been saved.");
+    }
+  }
+
   async function handleNext() {
     if (!validateStep(step)) return;
     setSaving(true);
@@ -289,17 +313,48 @@ export default function HotelWizard() {
     if (!validateStep(step)) return;
     setSaving(true);
     const ok = await saveAll();
-    setSaving(false);
-    if (!ok) return;
-    qc.invalidateQueries({ queryKey: ["myListings"] });
-    Alert.alert(
-      "Hotel Listing Saved",
-      "Your hotel listing has been saved. Would you like to review the submission requirements and submit it for review now?",
-      [
-        { text: "Later", onPress: () => router.replace("/(provider)/listings" as any) },
-        { text: "Submit Now", onPress: () => router.replace(`/listings/${listingId}/submit` as any) },
-      ]
-    );
+    if (!ok) {
+      setSaving(false);
+      return;
+    }
+
+    if (["draft", "rejected"].includes(status)) {
+      try {
+        await listingApi.post(`/listings/${listingId}/submit`);
+        setSaving(false);
+        qc.invalidateQueries({ queryKey: ["myListings"] });
+        Alert.alert(
+          "Submitted for Review",
+          "Your hotel listing has been submitted for admin review.",
+          [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+        );
+      } catch (e) {
+        setSaving(false);
+        Alert.alert("Submission Failed", apiErrorMessage(e));
+      }
+    } else if (status === "deactivated") {
+      try {
+        await listingApi.post(`/listings/${listingId}/reactivate`);
+        setSaving(false);
+        qc.invalidateQueries({ queryKey: ["myListings"] });
+        Alert.alert(
+          "Listing Reactivated",
+          "Your hotel listing is now reactivated.",
+          [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+        );
+      } catch (e) {
+        setSaving(false);
+        Alert.alert("Reactivation Failed", apiErrorMessage(e));
+      }
+    } else {
+      setSaving(false);
+      qc.invalidateQueries({ queryKey: ["myListings"] });
+      Alert.alert(
+        "Hotel Listing Saved",
+        "Your hotel listing changes have been saved.",
+        [{ text: "OK", onPress: () => router.replace("/(provider)/listings" as any) }]
+      );
+    }
   }
 
   function handleBack() {
@@ -317,13 +372,67 @@ export default function HotelWizard() {
   const allDocsUploaded = HOTEL_DOCS.every((d) =>
     media.documents.some((doc) => doc.documentType === d.key)
   );
+  const hasMinPhotos = media.photos.length >= 1;
   const isLastStep = step === STEPS.length - 1;
+
+  const lastLabel = ["draft", "rejected"].includes(status)
+    ? "Submit for Review"
+    : status === "deactivated"
+    ? "Reactivate"
+    : "Save & Finish";
+
+  const lastStepDisabled = isLastStep && (!allDocsUploaded || !hasMinPhotos);
+  const lastStepDisabledHint = isLastStep
+    ? !hasMinPhotos
+      ? "Upload at least 1 photo before submitting."
+      : !allDocsUploaded
+      ? "Upload all 3 required documents before submitting."
+      : undefined
+    : undefined;
+
+  if (!listingId) {
+    return (
+      <View style={[s.center, { padding: 24 }]}>
+        <Text style={{ fontSize: 18, fontWeight: "700", color: K.colors.textDark, marginBottom: 8, textAlign: "center" }}>
+          Listing Not Found
+        </Text>
+        <Text style={{ fontSize: 14, color: K.colors.textMuted, marginBottom: 20, textAlign: "center" }}>
+          No listing ID was provided to this setup wizard.
+        </Text>
+        <TouchableOpacity
+          style={{ backgroundColor: K.colors.accent, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
+          onPress={() => router.replace("/(provider)/listings" as any)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Back to My Listings</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (isLoading) {
     return (
       <View style={s.center}>
         <ActivityIndicator size="large" color={K.colors.accent} />
         <Text style={s.loadingText}>Loading your listing…</Text>
+      </View>
+    );
+  }
+
+  if (isError) {
+    return (
+      <View style={[s.center, { padding: 24 }]}>
+        <Text style={{ fontSize: 18, fontWeight: "700", color: K.colors.error, marginBottom: 8, textAlign: "center" }}>
+          Failed to Load Listing
+        </Text>
+        <Text style={{ fontSize: 14, color: K.colors.textMuted, marginBottom: 20, textAlign: "center" }}>
+          Could not fetch listing details from the server. Please verify your internet connection.
+        </Text>
+        <TouchableOpacity
+          style={{ backgroundColor: K.colors.accent, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
+          onPress={() => router.replace("/(provider)/listings" as any)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Back to My Listings</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -385,15 +494,20 @@ export default function HotelWizard() {
                 label="Find your hotel"
                 value={{ lat: form.lat, lng: form.lng, address: form.address }}
                 onChange={(place) => {
-                  setForm((f) => ({
-                    ...f,
-                    address: place.address || f.address,
-                    town: place.town || f.town,
-                    neighborhood: place.neighborhood || f.neighborhood,
-                    country: place.country || f.country,
-                    lat: place.lat,
-                    lng: place.lng,
-                  }));
+                  setForm((f) => {
+                    const nextCountry = place.country || f.country;
+                    const detectedCurrency = place.country ? getCurrencyForCountry(place.country) : null;
+                    return {
+                      ...f,
+                      address: place.address || f.address,
+                      town: place.town || f.town,
+                      neighborhood: place.neighborhood || f.neighborhood,
+                      country: nextCountry,
+                      currency: detectedCurrency || f.currency,
+                      lat: place.lat,
+                      lng: place.lng,
+                    };
+                  });
                   if (place.country) {
                     setSelectedCountry(ALL_COUNTRIES.find((c) => c.code === place.country) ?? null);
                   }
@@ -457,6 +571,12 @@ export default function HotelWizard() {
                 selected={form.currency}
                 onSelect={(v) => set("currency", v)}
                 error={errors.currency}
+              />
+
+              <PayoutCurrencyWarning
+                providerCountry={providerCountry}
+                listingCountry={form.country}
+                currency={form.currency}
               />
 
               <FormField
@@ -598,16 +718,14 @@ export default function HotelWizard() {
         <WizardFooter
           onNext={isLastStep ? handleFinish : handleNext}
           onBack={handleBack}
+          onSaveDraft={handleSaveDraft}
+          saveDraftLoading={savingDraft}
           isFirst={step === 0}
           isLast={isLastStep}
-          lastLabel="Save & Finish"
+          lastLabel={lastLabel}
           loading={saving}
-          disabled={isLastStep && !allDocsUploaded}
-          disabledHint={
-            isLastStep && !allDocsUploaded
-              ? "Upload all 3 required documents before finishing."
-              : undefined
-          }
+          disabled={lastStepDisabled}
+          disabledHint={lastStepDisabledHint}
         />
       </KeyboardAvoidingView>
 
