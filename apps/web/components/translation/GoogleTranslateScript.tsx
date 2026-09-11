@@ -10,6 +10,40 @@ declare global {
   }
 }
 
+// ── Monkey-patch DOM methods to prevent Google Translate React crashes ───────
+// Google Translate wraps text nodes in <font> tags. When React subsequently updates
+// (e.g. after promotions or vouchers fetch), React calls insertBefore or removeChild
+// assuming its original DOM tree. Because <font> tags altered parentNode references,
+// native DOM throws: "NotFoundError: Failed to execute 'insertBefore' on 'Node'".
+// This patch safely finds the proper parent/sibling or falls back cleanly.
+if (typeof window !== "undefined") {
+  const originalInsertBefore = Node.prototype.insertBefore;
+  Node.prototype.insertBefore = function <T extends Node>(newNode: T, referenceNode: Node | null): T {
+    if (referenceNode && referenceNode.parentNode !== this) {
+      let target: Node | null = referenceNode;
+      while (target && target.parentNode && target.parentNode !== this) {
+        target = target.parentNode;
+      }
+      if (target && target.parentNode === this) {
+        return originalInsertBefore.call(this, newNode, target) as T;
+      }
+      return originalInsertBefore.call(this, newNode, null) as T;
+    }
+    return originalInsertBefore.call(this, newNode, referenceNode) as T;
+  };
+
+  const originalRemoveChild = Node.prototype.removeChild;
+  Node.prototype.removeChild = function <T extends Node>(child: T): T {
+    if (child.parentNode !== this) {
+      if (child.parentNode) {
+        return child.parentNode.removeChild(child) as T;
+      }
+      return child;
+    }
+    return originalRemoveChild.call(this, child) as T;
+  };
+}
+
 export function GoogleTranslateScript() {
   const currentLanguage = useLanguageStore((s) => s.currentLanguage);
 
