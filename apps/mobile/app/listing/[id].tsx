@@ -499,6 +499,73 @@ export default function ListingDetailScreen() {
     onError: () => Alert.alert("Error", "Could not update saved status."),
   });
 
+  const isCar = listing?.category === "car";
+  const isHotel = listing?.category === "hotel";
+  const isApartment = listing?.category === "apartment";
+
+  // Locally selected dates take priority over URL params. Empty string means cleared.
+  const effectivePU = localStart !== null ? localStart : (pickupDatetime ?? "");
+  const effectiveRT = localEnd !== null ? localEnd : (returnDatetime ?? "");
+  const effectiveCI = localStart !== null ? localStart : (checkIn ?? "");
+  const effectiveCO = localEnd !== null ? localEnd : (checkOut ?? "");
+
+  const hasDates = isCar ? !!(effectivePU && effectiveRT) : !!(effectiveCI && effectiveCO);
+
+  // Helper to get disabled dates for any room type
+  const getDisabledDatesForRoomType = useCallback((rtId: string): Set<string> => {
+    const set = new Set<string>();
+    if (!availabilityData) return set;
+    if (availabilityData.unavailableRanges && availabilityData.unavailableRanges.length > 0) {
+      expandRangesToDateSet(availabilityData.unavailableRanges).forEach((d) => set.add(d));
+    }
+    const rtAvail = availabilityData.roomTypeAvailability?.find((r) => r.roomTypeId === rtId);
+    if (rtAvail?.unavailableRanges && rtAvail.unavailableRanges.length > 0) {
+      expandRangesToDateSet(rtAvail.unavailableRanges).forEach((d) => set.add(d));
+    }
+    return set;
+  }, [availabilityData]);
+
+  // Current disabled dates scoped to current category & selected room type
+  const currentDisabledDates = useMemo(() => {
+    const set = new Set<string>();
+    if (!availabilityData) return set;
+    if (availabilityData.unavailableRanges && availabilityData.unavailableRanges.length > 0) {
+      expandRangesToDateSet(availabilityData.unavailableRanges).forEach((d) => set.add(d));
+    }
+    if (isHotel && selectedRoomTypeId && availabilityData.roomTypeAvailability?.length) {
+      const rtAvail = availabilityData.roomTypeAvailability.find((r) => r.roomTypeId === selectedRoomTypeId);
+      if (rtAvail?.unavailableRanges && rtAvail.unavailableRanges.length > 0) {
+        expandRangesToDateSet(rtAvail.unavailableRanges).forEach((d) => set.add(d));
+      }
+    }
+    return set;
+  }, [availabilityData, isHotel, selectedRoomTypeId]);
+
+  // Set of room type IDs that conflict with the current dates
+  const unavailableRoomTypeIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!effectiveCI || !effectiveCO || !roomTypes.length) return set;
+    for (const rt of roomTypes) {
+      const rtDisabled = getDisabledDatesForRoomType(rt.id);
+      if (hasBookedNightInRange(effectiveCI, effectiveCO, rtDisabled)) {
+        set.add(rt.id);
+      }
+    }
+    return set;
+  }, [effectiveCI, effectiveCO, roomTypes, getDisabledDatesForRoomType]);
+
+  // Check if current date selection conflicts with listing or selected room type
+  const isCurrentSelectionConflicted = useMemo(() => {
+    if (isCar) {
+      if (!effectivePU || !effectiveRT || currentDisabledDates.size === 0) return false;
+      const puDate = effectivePU.split("T")[0]!;
+      const rtDate = effectiveRT.split("T")[0]!;
+      return hasBookedNightInRange(puDate, rtDate, currentDisabledDates);
+    }
+    if (!effectiveCI || !effectiveCO || currentDisabledDates.size === 0) return false;
+    return hasBookedNightInRange(effectiveCI, effectiveCO, currentDisabledDates);
+  }, [isCar, effectivePU, effectiveRT, effectiveCI, effectiveCO, currentDisabledDates]);
+
   // ── States ──
   if (isLoading) return <Skeleton />;
   if (isError || !listing) {
@@ -514,9 +581,6 @@ export default function ListingDetailScreen() {
     );
   }
 
-  const isCar = listing.category === "car";
-  const isHotel = listing.category === "hotel";
-  const isApartment = listing.category === "apartment";
   // Previously "is this a provider account". Any user can now both host and
   // book, so the question that actually matters on this screen is whether the
   // viewer owns *this* listing — you cannot book, favourite or message
@@ -594,69 +658,6 @@ export default function ListingDetailScreen() {
   const discountPercent = promoted.hasPromotion && promoted.originalPrice && promoted.discountedPrice
     ? Math.round(((promoted.originalPrice - promoted.discountedPrice) / promoted.originalPrice) * 100)
     : null;
-
-  // Locally selected dates take priority over URL params. Empty string means cleared.
-  const effectivePU = localStart !== null ? localStart : (pickupDatetime ?? "");
-  const effectiveRT = localEnd !== null ? localEnd : (returnDatetime ?? "");
-  const effectiveCI = localStart !== null ? localStart : (checkIn ?? "");
-  const effectiveCO = localEnd !== null ? localEnd : (checkOut ?? "");
-
-  const hasDates = isCar ? !!(effectivePU && effectiveRT) : !!(effectiveCI && effectiveCO);
-
-  // Helper to get disabled dates for any room type
-  const getDisabledDatesForRoomType = useCallback((rtId: string): Set<string> => {
-    const set = new Set<string>();
-    if (!availabilityData) return set;
-    if (availabilityData.unavailableRanges && availabilityData.unavailableRanges.length > 0) {
-      expandRangesToDateSet(availabilityData.unavailableRanges).forEach((d) => set.add(d));
-    }
-    const rtAvail = availabilityData.roomTypeAvailability?.find((r) => r.roomTypeId === rtId);
-    if (rtAvail?.unavailableRanges && rtAvail.unavailableRanges.length > 0) {
-      expandRangesToDateSet(rtAvail.unavailableRanges).forEach((d) => set.add(d));
-    }
-    return set;
-  }, [availabilityData]);
-
-  // Current disabled dates scoped to current category & selected room type
-  const currentDisabledDates = useMemo(() => {
-    const set = new Set<string>();
-    if (!availabilityData) return set;
-    if (availabilityData.unavailableRanges && availabilityData.unavailableRanges.length > 0) {
-      expandRangesToDateSet(availabilityData.unavailableRanges).forEach((d) => set.add(d));
-    }
-    if (isHotel && selectedRoomTypeId && availabilityData.roomTypeAvailability?.length) {
-      const rtAvail = availabilityData.roomTypeAvailability.find((r) => r.roomTypeId === selectedRoomTypeId);
-      if (rtAvail?.unavailableRanges && rtAvail.unavailableRanges.length > 0) {
-        expandRangesToDateSet(rtAvail.unavailableRanges).forEach((d) => set.add(d));
-      }
-    }
-    return set;
-  }, [availabilityData, isHotel, selectedRoomTypeId]);
-
-  // Set of room type IDs that conflict with the current dates
-  const unavailableRoomTypeIds = useMemo(() => {
-    const set = new Set<string>();
-    if (!effectiveCI || !effectiveCO || !roomTypes.length) return set;
-    for (const rt of roomTypes) {
-      const rtDisabled = getDisabledDatesForRoomType(rt.id);
-      if (hasBookedNightInRange(effectiveCI, effectiveCO, rtDisabled)) {
-        set.add(rt.id);
-      }
-    }
-    return set;
-  }, [effectiveCI, effectiveCO, roomTypes, getDisabledDatesForRoomType]);
-
-  // Check if current date selection conflicts with listing or selected room type
-  const isCurrentSelectionConflicted = useMemo(() => {
-    if (isCar) {
-      if (!effectivePU || !effectiveRT || currentDisabledDates.size === 0) return false;
-      const puDate = effectivePU.split("T")[0]!;
-      const rtDate = effectiveRT.split("T")[0]!;
-      return hasBookedNightInRange(puDate, rtDate, currentDisabledDates);
-    }
-    if (!effectiveCI || !effectiveCO || currentDisabledDates.size === 0) return false;
-    return hasBookedNightInRange(effectiveCI, effectiveCO, currentDisabledDates);
-  }, [isCar, effectivePU, effectiveRT, effectiveCI, effectiveCO, currentDisabledDates]);
 
   // Handle switching room types with intelligent availability checking
   function handleSelectRoomType(targetId: string) {
