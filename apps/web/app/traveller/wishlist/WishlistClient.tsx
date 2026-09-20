@@ -21,6 +21,8 @@ function mapListing(item: any): PublicListingDetail | null {
   // The API may return { listingId, listing: {...} } or a flat listing object
   const raw = item.listing ?? item;
   if (!raw?.id && !raw?.listingId) return null;
+  const status = raw.status;
+  if (status && status !== "approved" && status !== "active") return null;
   const town = raw.town || raw.city || "";
   const country = raw.country || raw.countryCode || "";
   const rawRoomTypes = raw.hotelRoomTypes || raw.roomTypes || [];
@@ -135,7 +137,13 @@ export default function WishlistClient() {
         const raw = res.data.data ?? [];
         console.log("[Wishlist] API data:", raw);
         const data: any[] = Array.isArray(raw) ? raw : (raw?.favourites ?? []);
-        const mapped = data.map(mapListing).filter((l): l is PublicListingDetail => l !== null);
+        const mapped = data
+          .filter((item: any) => {
+            const s = item.listing?.status ?? item.status;
+            return s === "approved" || s === "active";
+          })
+          .map(mapListing)
+          .filter((l): l is PublicListingDetail => l !== null);
         console.log("[Wishlist] Favourite IDs:", mapped.map((l) => l.id));
         setListings(mapped);
         console.log("[Favourites] Wishlist loaded | Count:", mapped.length);

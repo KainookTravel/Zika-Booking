@@ -2,6 +2,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { z } from "zod";
 import { api, logoutUser } from "@/lib/api";           // auth-service: POST /auth/logout only
 import { listingApi } from "@/lib/listing-api";
 import { ensureAnonymousToken } from "@/lib/anonymous";
@@ -441,7 +442,7 @@ export default function TravellerDashboard() {
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [specialRequests, setSpecialRequests] = useState("");
-  const [driverAge, setDriverAge] = useState<number>(25);
+  const [driverAge, setDriverAge] = useState<number | "">("");
   const [driverFirstName, setDriverFirstName] = useState("");
   const [driverLastName, setDriverLastName] = useState("");
   const [deliveryRequested, setDeliveryRequested] = useState(false);
@@ -702,8 +703,11 @@ export default function TravellerDashboard() {
     }
     if (!isAuthenticated) return;
     fetchRecentlyViewed().then((items) => {
+      const activeItems = items.filter(
+        (v) => v.listing && (!v.listing.status || v.listing.status === "active" || v.listing.status === "approved"),
+      );
       setRecentlyViewed(
-        items.slice(0, 4).map((v) => ({
+        activeItems.slice(0, 4).map((v) => ({
           id: v.listing.id,
           providerId: "",
           category: v.listing.category as "hotel" | "apartment" | "car",
@@ -803,6 +807,8 @@ export default function TravellerDashboard() {
       fuelType: l.fuelType,
       seats: l.seats,
       mileagePolicy: l.mileagePolicy,
+      minimumDriverAge: l.minimumDriverAge != null ? Number(l.minimumDriverAge) : (l.minDriverAge != null ? Number(l.minDriverAge) : null),
+      minDriverAge: l.minDriverAge != null ? Number(l.minDriverAge) : (l.minimumDriverAge != null ? Number(l.minimumDriverAge) : null),
       deliveryAvailable: !!l.deliveryEnabled,
       deliveryFee: l.deliveryFee != null ? Number(l.deliveryFee) : null,
       deliveryRadiusKm: l.deliveryRadiusKm != null ? Number(l.deliveryRadiusKm) : null,
@@ -1637,6 +1643,8 @@ export default function TravellerDashboard() {
           // computed a 0% service fee.
           commissionRate: item.commissionRate ?? null,
           serviceFeeRate: item.serviceFeeRate ?? null,
+          minimumDriverAge: item.minimumDriverAge != null ? Number(item.minimumDriverAge) : (item.minDriverAge != null ? Number(item.minDriverAge) : null),
+          minDriverAge: item.minDriverAge != null ? Number(item.minDriverAge) : (item.minimumDriverAge != null ? Number(item.minimumDriverAge) : null),
           deliveryAvailable: !!item.deliveryEnabled,
           deliveryFee: item.deliveryFee != null ? Number(item.deliveryFee) : null,
           deliveryRadiusKm: item.deliveryRadiusKm != null ? Number(item.deliveryRadiusKm) : null,
@@ -2192,6 +2200,23 @@ export default function TravellerDashboard() {
       body.checkIn = detailCheckIn;
       body.checkOut = detailCheckOut;
     } else {
+      const minAge = Number(detailListing.minimumDriverAge ?? detailListing.minDriverAge) || 18;
+      const driverAgeSchema = z
+        .number({
+          required_error: "Driver age is required.",
+          invalid_type_error: "Please enter a valid driver age.",
+        })
+        .int("Driver age must be a whole number.")
+        .min(minAge, `Driver must be at least ${minAge} years old.`)
+        .max(100, "Driver age cannot exceed 100 years.");
+
+      const parseResult = driverAgeSchema.safeParse(driverAge === "" ? undefined : Number(driverAge));
+      if (!parseResult.success) {
+        setBookingError(parseResult.error.errors[0]?.message ?? "Invalid driver age.");
+        setSubmittingCheckout(false);
+        return;
+      }
+
       if (deliveryRequested && !deliveryAddress.trim()) {
         setBookingError("Please enter a delivery address.");
         setSubmittingCheckout(false);
@@ -2201,7 +2226,7 @@ export default function TravellerDashboard() {
       body.returnDatetime = toIsoDatetime(detailReturnDate);
       body.driverFirstName = driverFirstName || firstName;
       body.driverLastName = driverLastName || lastName;
-      body.driverAge = driverAge;
+      body.driverAge = parseResult.data;
       body.deliveryRequested = deliveryRequested;
       body.deliveryAddress = deliveryAddress.trim();
     }
@@ -2375,6 +2400,23 @@ export default function TravellerDashboard() {
       }
     }
     const isCar = detailListing.category === "car";
+    if (isCar) {
+      const minAge = Number(detailListing.minimumDriverAge ?? detailListing.minDriverAge) || 18;
+      const driverAgeSchema = z
+        .number({
+          required_error: "Driver age is required.",
+          invalid_type_error: "Please enter a valid driver age.",
+        })
+        .int("Driver age must be a whole number.")
+        .min(minAge, `Driver must be at least ${minAge} years old.`)
+        .max(100, "Driver age cannot exceed 100 years.");
+
+      const parseResult = driverAgeSchema.safeParse(driverAge === "" ? undefined : Number(driverAge));
+      if (!parseResult.success) {
+        setBookingError(parseResult.error.errors[0]?.message ?? "Invalid driver age.");
+        return;
+      }
+    }
     const isHotel = detailListing.category === "hotel";
     const selectedRt = isHotel
       ? (detailListing.roomTypes ?? []).find((r) => r.id === selectedRoomTypeId)
@@ -2406,7 +2448,7 @@ export default function TravellerDashboard() {
       firstName, lastName, email, phone, specialRequests,
       driverFirstName: isCar ? (driverFirstName || firstName) : undefined,
       driverLastName: isCar ? (driverLastName || lastName) : undefined,
-      driverAge: isCar ? driverAge : undefined,
+      driverAge: isCar ? (typeof driverAge === "number" ? driverAge : Number(driverAge)) : undefined,
       deliveryRequested: isCar ? deliveryRequested : undefined,
       deliveryAddress: isCar ? deliveryAddress : undefined,
       roomTypeId: selectedRoomTypeId ?? undefined,
@@ -2732,6 +2774,12 @@ export default function TravellerDashboard() {
                         <div className={POLICY_CARD}>
                           <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Mileage</p>
                           <p className="font-semibold text-slate-800 mt-1 capitalize">{detailListing.mileagePolicy}</p>
+                        </div>
+                      )}
+                      {detailListing.category === "car" && (detailListing.minimumDriverAge || detailListing.minDriverAge) && (
+                        <div className={POLICY_CARD}>
+                          <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Min Driver Age</p>
+                          <p className="font-semibold text-slate-800 mt-1">{detailListing.minimumDriverAge ?? detailListing.minDriverAge} years</p>
                         </div>
                       )}
                     </div>
@@ -3365,9 +3413,32 @@ export default function TravellerDashboard() {
                               <input type="email" required placeholder="Email Address" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#1D8D2B]" />
                               <input type="tel" placeholder="Phone (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#1D8D2B]" />
                               <textarea placeholder="Special requests (optional)" value={specialRequests} onChange={(e) => setSpecialRequests(e.target.value)} rows={2} className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#1D8D2B] resize-none" />
-                              {detailListing.category === "car" && (
-                                <input type="number" required min="18" max="99" placeholder="Driver Age" value={driverAge} onChange={(e) => setDriverAge(Number(e.target.value))} className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#1D8D2B]" />
-                              )}
+                              {detailListing.category === "car" && (() => {
+                                const minAge = Number(detailListing.minimumDriverAge ?? detailListing.minDriverAge) || 18;
+                                return (
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                                      Driver Age (min. {minAge} years) <span className="text-red-500">*</span>
+                                    </label>
+                                    <input
+                                      type="number"
+                                      required
+                                      min={minAge}
+                                      max={100}
+                                      placeholder={`Minimum age: ${minAge}`}
+                                      value={driverAge}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setDriverAge(v === "" ? "" : Number(v));
+                                        if (bookingError && (bookingError.toLowerCase().includes("driver") || bookingError.toLowerCase().includes("age"))) {
+                                          setBookingError("");
+                                        }
+                                      }}
+                                      className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#1D8D2B]"
+                                    />
+                                  </div>
+                                );
+                              })()}
                             </div>
 
                             {/* Discount section — promotion badge */}
