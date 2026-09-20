@@ -86,6 +86,7 @@ interface PublicListing {
   carMake: string | null; carModel: string | null; carYear: number | null;
   bodyType: string | null; transmission: string | null; fuelType: string | null;
   seats: number | null; mileagePolicy: string | null; mileageLimitKm: number | null;
+  minimumDriverAge?: number | null;
   minDriverAge: number | null; securityDeposit: number | null; deliveryAvailable: boolean | null;
   /** Provider supplies a driver — backend waives the deposit when true. */
   driverProvided?: boolean | null;
@@ -822,7 +823,8 @@ export default function ListingDetailScreen() {
       return rows;
     }
     const rows: { icon: React.ComponentProps<typeof Ionicons>["name"]; label: string; value: string }[] = [];
-    if (listing.minDriverAge) rows.push({ icon: "person-outline", label: "Min driver age", value: `${listing.minDriverAge} years` });
+    const minAge = listing.minimumDriverAge ?? listing.minDriverAge;
+    if (minAge) rows.push({ icon: "person-outline", label: "Min driver age", value: `${minAge} years` });
     rows.push({ icon: "speedometer-outline", label: "Mileage", value: listing.mileagePolicy === "unlimited" ? "Unlimited" : listing.mileageLimitKm ? `${listing.mileageLimitKm} km/day` : "See host" });
     if (listing.fuelType) rows.push({ icon: "car-outline", label: "Fuel type", value: listing.fuelType.charAt(0).toUpperCase() + listing.fuelType.slice(1) });
     // A supplied driver waives the deposit server-side, so never quote one here.
@@ -852,6 +854,7 @@ export default function ListingDetailScreen() {
       return;
     }
     if (isCar) {
+      const minAge = listing.minimumDriverAge ?? listing.minDriverAge;
       router.push({
         pathname: "/book/[listingId]",
         params: {
@@ -861,6 +864,7 @@ export default function ListingDetailScreen() {
           listingCategory: listing.category,
           listingTitle: listing.title ?? listing.name ?? "",
           listingCountry: listing.country ?? "",
+          minimumDriverAge: minAge != null ? String(minAge) : "",
         },
       });
     } else {

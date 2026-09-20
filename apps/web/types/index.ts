@@ -79,6 +79,8 @@ export interface PublicListingDetail {
   /** Provider supplies a driver with the vehicle. When true the backend waives
    *  the security deposit, so any deposit shown to a guest must be gated on this. */
   driverProvided?: boolean;
+  minimumDriverAge?: number | null;
+  minDriverAge?: number | null;
   deliveryAvailable?: boolean;
   deliveryFee?: number | null;
   deliveryRadiusKm?: number | null;
