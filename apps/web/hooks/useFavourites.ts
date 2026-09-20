@@ -29,6 +29,10 @@ export function useFavourites(): FavouritesHook {
         console.log("[Favourites] Raw response:", raw);
         console.log("[Favourites] Parsed favourites:", favourites);
         const favouriteIdsList = favourites
+          .filter((item: any) => {
+            const s = item.listing?.status ?? item.status;
+            return !s || s === "approved" || s === "active";
+          })
           .map((item: any) => (item.listingId ?? item.id) as string)
           .filter(Boolean);
         console.log("[Favourites] Favourite IDs:", favouriteIdsList);

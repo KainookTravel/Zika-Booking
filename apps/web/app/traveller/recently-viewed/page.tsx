@@ -38,7 +38,15 @@ export default function RecentlyViewedPage() {
       return;
     }
     fetchRecentlyViewed()
-      .then(setItems)
+      .then((data) =>
+        setItems(
+          data.filter(
+            (v) =>
+              v.listing &&
+              (!v.listing.status || v.listing.status === "approved" || v.listing.status === "active"),
+          ),
+        ),
+      )
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [_hasHydrated, isAuthenticated]);

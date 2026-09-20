@@ -212,7 +212,10 @@ export default function SavedScreen() {
     queryKey: ["favourites", localCurrency],
     queryFn:  async () => {
       const res = await listingApi.get<FavouritesResponse>("/guests/me/favourites");
-      setAllFavourites(res.data.data.favourites);
+      const valid = (res.data.data.favourites ?? []).filter(
+        (f) => f.listing && (!f.listing.status || f.listing.status === "approved" || f.listing.status === "active"),
+      );
+      setAllFavourites(valid);
       setCursor(res.data.data.nextCursor);
       return res.data;
     },
@@ -225,7 +228,10 @@ export default function SavedScreen() {
     setLoadingMore(true);
     try {
       const res = await listingApi.get<FavouritesResponse>(`/guests/me/favourites?cursor=${cursor}`);
-      setAllFavourites(prev => [...prev, ...res.data.data.favourites]);
+      const valid = (res.data.data.favourites ?? []).filter(
+        (f) => f.listing && (!f.listing.status || f.listing.status === "approved" || f.listing.status === "active"),
+      );
+      setAllFavourites(prev => [...prev, ...valid]);
       setCursor(res.data.data.nextCursor);
     } catch {
       Alert.alert("Error", "Could not load more saved listings.");

@@ -15,8 +15,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
+import { z } from "zod";
 import * as SecureStore from "expo-secure-store";
 import { listingApi } from "../../lib/listing-api";
 import { api } from "../../lib/api";
@@ -204,6 +205,8 @@ export default function BookingFlowScreen() {
     listingTitle?: string;
     listingCategory?: string;
     listingCountry?: string;
+    minimumDriverAge?: string;
+    minDriverAge?: string;
   }>();
 
   const {
@@ -217,12 +220,28 @@ export default function BookingFlowScreen() {
     listingTitle,
     listingCategory,
     listingCountry,
+    minimumDriverAge: paramMinimumDriverAge,
+    minDriverAge: paramMinDriverAge,
   } = params;
 
   const checkoutPromo = useActivePromotion(listingCategory ?? null);
 
   const isCar = !!pickupDatetime;
   const isHotelOrApartment = !isCar;
+
+  const { data: publicListingData } = useQuery<{ minimumDriverAge?: number | null; minDriverAge?: number | null }>({
+    queryKey: ["listing-public-min-age", listingId],
+    queryFn: async () => {
+      const res = await listingApi.get<{ data: { minimumDriverAge?: number | null; minDriverAge?: number | null } }>(`/listings/${listingId}/public`);
+      return res.data?.data;
+    },
+    enabled: isCar && !paramMinimumDriverAge && !paramMinDriverAge && !!listingId,
+  });
+
+  const parsedParamMinAge = paramMinimumDriverAge || paramMinDriverAge ? Number(paramMinimumDriverAge || paramMinDriverAge) : null;
+  const effectiveMinAge = (parsedParamMinAge && !isNaN(parsedParamMinAge) && parsedParamMinAge > 0)
+    ? parsedParamMinAge
+    : (publicListingData?.minimumDriverAge ?? publicListingData?.minDriverAge ?? 18);
 
   // ── Step state ────────────────────────────────────────────────────────────
   const [step, setStep] = useState(0);
@@ -824,10 +843,23 @@ export default function BookingFlowScreen() {
     if (isCar) {
       if (!driverFirstName.trim()) return "Driver first name is required.";
       if (!driverLastName.trim()) return "Driver last name is required.";
-      const parsedAge = parseInt(driverAge, 10);
-      if (!driverAge.trim() || isNaN(parsedAge)) return "Driver age is required.";
-      if (parsedAge < 18) return "Driver must be at least 18 years old.";
-      if (parsedAge > 120) return "Please enter a valid driver age.";
+
+      const driverAgeSchema = z
+        .number({
+          required_error: "Driver age is required.",
+          invalid_type_error: "Please enter a valid driver age.",
+        })
+        .int("Driver age must be a whole number.")
+        .min(effectiveMinAge, `Driver must be at least ${effectiveMinAge} years old.`)
+        .max(100, "Please enter a valid driver age.");
+
+      const rawAge = driverAge.trim();
+      if (!rawAge) return "Driver age is required.";
+      const parsedAge = parseInt(rawAge, 10);
+      const zodResult = driverAgeSchema.safeParse(parsedAge);
+      if (!zodResult.success) {
+        return zodResult.error.errors[0]?.message ?? "Invalid driver age.";
+      }
       if (deliveryRequested && !deliveryAddress.trim()) return "Delivery address is required.";
     }
     return null;
@@ -1275,12 +1307,12 @@ export default function BookingFlowScreen() {
                   />
                 </FieldGroup>
 
-                <FieldGroup label="Driver age *">
+                <FieldGroup label={`Driver age (min. ${effectiveMinAge} years) *`}>
                   <TextInput
                     style={styles.input}
                     value={driverAge}
                     onChangeText={(t) => setDriverAge(t.replace(/\D/g, ""))}
-                    placeholder="e.g. 25"
+                    placeholder={`Minimum age: ${effectiveMinAge}`}
                     keyboardType="numeric"
                   />
                 </FieldGroup>
