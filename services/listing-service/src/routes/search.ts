@@ -1157,7 +1157,9 @@ export async function searchRoutes(app: FastifyInstance) {
         const { listingId } = req.body as { listingId: string };
 
       const listing = await prisma.listing.findUnique({ where: { id: listingId, deletedAt: null } });
-      if (!listing) return sendError(reply, 404, "NOT_FOUND", "Listing not found.");
+      if (!listing || !["approved", "active"].includes(listing.status)) {
+        return sendError(reply, 404, "NOT_FOUND", "Listing not found or no longer available.");
+      }
 
       await prisma.userFavourite.upsert({
         where: { userId_listingId: { userId, listingId } },
@@ -1226,7 +1228,13 @@ export async function searchRoutes(app: FastifyInstance) {
       const limit = 20;
 
       const favs = await prisma.userFavourite.findMany({
-        where: { userId },
+        where: {
+          userId,
+          listing: {
+            deletedAt: null,
+            status: { in: ["approved", "active"] },
+          },
+        },
         orderBy: { createdAt: "desc" },
         skip: cursor,
         take: limit + 1,
@@ -1237,8 +1245,15 @@ export async function searchRoutes(app: FastifyInstance) {
         },
       });
 
-      const hasMore = favs.length > limit;
-      const page = hasMore ? favs.slice(0, limit) : favs;
+      const validFavs = favs.filter(
+        (f) =>
+          f.listing &&
+          f.listing.deletedAt === null &&
+          (f.listing.status === "approved" || f.listing.status === "active"),
+      );
+
+      const hasMore = validFavs.length > limit;
+      const page = hasMore ? validFavs.slice(0, limit) : validFavs;
 
       const commissionRates = await getCommissionRateBatch(page.map((f) => f.listing.country ?? null));
 
@@ -1306,7 +1321,7 @@ export async function searchRoutes(app: FastifyInstance) {
         const { listingId } = req.body as { listingId: string };
 
       const listing = await prisma.listing.findUnique({ where: { id: listingId, deletedAt: null } });
-      if (!listing) return reply.status(204).send();
+      if (!listing || !["approved", "active"].includes(listing.status)) return reply.status(204).send();
 
       await prisma.userRecentlyViewed.upsert({
         where: { userId_listingId: { userId, listingId } },
@@ -1354,7 +1369,13 @@ export async function searchRoutes(app: FastifyInstance) {
         const target = q["currency"]?.toUpperCase() || null;
 
       const views = await prisma.userRecentlyViewed.findMany({
-        where: { userId },
+        where: {
+          userId,
+          listing: {
+            deletedAt: null,
+            status: { in: ["approved", "active"] },
+          },
+        },
         orderBy: { viewedAt: "desc" },
         take: 20,
         include: {
@@ -1364,10 +1385,17 @@ export async function searchRoutes(app: FastifyInstance) {
         },
       });
 
-      const commissionRates = await getCommissionRateBatch(views.map((v) => v.listing.country ?? null));
+      const validViews = views.filter(
+        (v) =>
+          v.listing &&
+          v.listing.deletedAt === null &&
+          (v.listing.status === "approved" || v.listing.status === "active"),
+      );
+
+      const commissionRates = await getCommissionRateBatch(validViews.map((v) => v.listing.country ?? null));
 
       return sendSuccess(reply, 200, {
-        recentlyViewed: await Promise.all(views.map(async (v) => {
+        recentlyViewed: await Promise.all(validViews.map(async (v) => {
           const commissionRate = commissionRates.get(v.listing.country ?? null) ?? 0;
           const baseCurrency = v.listing.currency ?? "USD";
           const rawNightlyRate = v.listing.pricePerNight ? Number(v.listing.pricePerNight) : null;
@@ -1441,7 +1469,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
       for (const item of items.slice(0, 20)) {
         const listing = await prisma.listing.findUnique({ where: { id: item.listingId, deletedAt: null } });
-        if (!listing) continue;
+        if (!listing || !["approved", "active"].includes(listing.status)) continue;
         await prisma.userRecentlyViewed.upsert({
           where: { userId_listingId: { userId, listingId: item.listingId } },
           create: { userId, listingId: item.listingId, viewedAt: new Date(item.viewedAt) },

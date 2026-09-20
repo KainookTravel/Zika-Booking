@@ -703,8 +703,11 @@ export default function TravellerDashboard() {
     }
     if (!isAuthenticated) return;
     fetchRecentlyViewed().then((items) => {
+      const activeItems = items.filter(
+        (v) => v.listing && (!v.listing.status || v.listing.status === "active" || v.listing.status === "approved"),
+      );
       setRecentlyViewed(
-        items.slice(0, 4).map((v) => ({
+        activeItems.slice(0, 4).map((v) => ({
           id: v.listing.id,
           providerId: "",
           category: v.listing.category as "hotel" | "apartment" | "car",

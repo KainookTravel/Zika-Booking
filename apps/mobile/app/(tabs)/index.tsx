@@ -941,7 +941,12 @@ export default function HomeScreen() {
         const res = await listingApi.get<{
           data: { recentlyViewed: Array<{ listing: Record<string, unknown> }> };
         }>("/guests/me/recently-viewed");
-        return (res.data.data.recentlyViewed ?? []).map(({ listing: l }): SearchResult => ({
+        const rawList = res.data.data.recentlyViewed ?? [];
+        const activeList = rawList.filter(
+          ({ listing: l }) =>
+            l && (!l.status || (l.status as string) === "approved" || (l.status as string) === "active"),
+        );
+        return activeList.map(({ listing: l }): SearchResult => ({
           id: l.id as string,
           listingType: l.category as string,
           title: l.title as string,
