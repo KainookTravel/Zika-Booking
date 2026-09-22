@@ -8,6 +8,7 @@ import { SERVICE_FEE_RATE } from "../services/billing.service.js";
 import { getRatesBatch, getExchangeRate, ceilingForCurrency, getConvertedAmounts, getLocalizedContext } from "../services/exchangeRate.services.js";
 import { buildPriceFilter, buildGuestPriceExpr } from "../lib/priceFilter.js";
 import { buildUserRatingFilterClause, userRatingsOrderExpr } from "../lib/searchFilters.js";
+import { getActivePromotion, promotionAmount, promotionDisplay } from "../services/promotion.service.js";
 
 // ── Route plugin ─────────────────────────────────────────────────────────────
 
@@ -432,18 +433,6 @@ export async function searchRoutes(app: FastifyInstance) {
       },
     }).catch(() => { /* non-critical */ });
 
-    // Fetch active promotion badge for this category (non-critical, never blocks search)
-    let promoBadge: { labelText: string; labelColour: string } | null = null;
-    try {
-      const now = new Date();
-      const promo = await (prisma as any).activityPromotion.findFirst({
-        where: { activity: category, status: "active", validFrom: { lte: now }, validUntil: { gte: now } },
-        orderBy: { createdAt: "desc" },
-        select: { labelText: true, labelColour: true },
-      });
-      if (promo) promoBadge = { labelText: promo.labelText, labelColour: promo.labelColour };
-    } catch { /* non-critical */ }
-
     // Batch-fetch exchange rates for all listing currencies in one query
     let rateMap = new Map<string, number>();
     if (targetCurrency) {
@@ -453,9 +442,25 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // Batch-fetch commission rates for the page's countries (one query, no N+1)
     const commissionRates = await getCommissionRateBatch(page.map((l) => l.country ?? null));
+    const promotionCache = new Map<string, Promise<any>>();
+    const resolvePromotion = (activity: string, country: string | null) => {
+      const key = `${activity}:${country ?? "*"}`;
+      let promotion = promotionCache.get(key);
+      if (!promotion) {
+        // Promotion metadata is deliberately non-critical. Cache the promise
+        // before awaiting it so concurrent listings share one lookup, and
+        // convert failures into an empty promotion rather than failing search.
+        promotion = getActivePromotion(activity, country).catch(() => null);
+        promotionCache.set(key, promotion);
+      }
+      return promotion;
+    };
 
-    const results = page.map((l) => {
+    const results = await Promise.all(page.map(async (l) => {
       const commissionRate = commissionRates.get(l.country ?? null) ?? 0;
+      const promo = await resolvePromotion(l.category, l.country);
+      const pricingPromo = promo?.applyToBooking ? promo : null;
+      const displayPromo = promo && (promo.applyToBooking || promo.discountType === "label_only") ? promo : null;
 
       // Calculate the guest-facing rate: use the minimum room-type price for
       // hotels, otherwise the raw list price. The commission is no longer baked
@@ -502,6 +507,8 @@ export async function searchRoutes(app: FastifyInstance) {
         if (localizedDailyRate !== null) localizedDailyRate = ceilingForCurrency(localizedDailyRate * rate, targetCurrency);
       }
 
+      const displayBaseRate = l.category === "car" ? dailyRate : nightlyRate;
+      const promotionDiscount = promotionAmount(displayBaseRate ?? 0, pricingPromo);
       return {
         id: l.id,
         listingType: l.category,
@@ -519,6 +526,18 @@ export async function searchRoutes(app: FastifyInstance) {
         localizedNightlyRate,
         localizedDailyRate,
         localizedCurrency,
+        originalNightlyRate: nightlyRate,
+        discountedNightlyRate: nightlyRate == null ? null : promotionDisplay(promotionAmount(nightlyRate, pricingPromo), nightlyRate).discountedPrice,
+        originalDailyRate: dailyRate,
+        discountedDailyRate: dailyRate == null ? null : promotionDisplay(promotionAmount(dailyRate, pricingPromo), dailyRate).discountedPrice,
+        promotionDiscount,
+        promotion: displayPromo ? {
+          id: displayPromo.id,
+          discountType: displayPromo.discountType,
+          discountValue: displayPromo.discountValue == null ? null : Number(displayPromo.discountValue),
+          labelText: displayPromo.labelText,
+          labelColour: displayPromo.labelColour,
+        } : null,
         commissionRate,
         serviceFeeRate: SERVICE_FEE_RATE,
         cancellationPolicy: l.cancellationPolicy,
@@ -544,9 +563,9 @@ export async function searchRoutes(app: FastifyInstance) {
         // Favourited
         isFavourited: guestId ? favouriteSet.has(l.id) : undefined,
         // Promotion badge (null when no active campaign for this category)
-        promoBadge,
+        promoBadge: displayPromo ? { labelText: displayPromo.labelText, labelColour: displayPromo.labelColour } : null,
       };
-    });
+    }));
 
     return sendSuccess(reply, 200, {
       totalCount: total,
@@ -703,17 +722,9 @@ export async function searchRoutes(app: FastifyInstance) {
 
       const listingPhotos = listing.photos;
 
-      // Fetch active promotion badge for this category
-      let promoBadge: { labelText: string; labelColour: string } | null = null;
-      try {
-        const now = new Date();
-        const promo = await (prisma as any).activityPromotion.findFirst({
-          where: { activity: listing.category, status: "active", validFrom: { lte: now }, validUntil: { gte: now } },
-          orderBy: { createdAt: "desc" },
-          select: { labelText: true, labelColour: true },
-        });
-        if (promo) promoBadge = { labelText: promo.labelText, labelColour: promo.labelColour };
-      } catch { /* non-critical */ }
+      const promo = await getActivePromotion(listing.category, listing.country).catch(() => null);
+      const pricingPromo = promo?.applyToBooking ? promo : null;
+      const displayPromo = promo && (promo.applyToBooking || promo.discountType === "label_only") ? promo : null;
 
       const commissionRate = await getCommissionRate(listing.country ?? null);
 
@@ -729,6 +740,10 @@ export async function searchRoutes(app: FastifyInstance) {
       const nightlyRate: number | null = baseNightlyRate;
       const baseDailyRate: number | null = listing.category === "car" && listing.pricePerDay ? Number(listing.pricePerDay) : null;
       const dailyRate: number | null = baseDailyRate;
+      const listingPromotionDiscount = promotionAmount(
+        listing.category === "car" ? (dailyRate ?? 0) : (nightlyRate ?? 0),
+        pricingPromo,
+      );
       const localizedNightlyRate: number | null =
         ctx.currency === null ? null
         : (ctx.rate !== null && nightlyRate !== null ? ceilingForCurrency(nightlyRate * ctx.rate, ctx.currency) : nightlyRate);
@@ -798,6 +813,18 @@ export async function searchRoutes(app: FastifyInstance) {
         localizedNightlyRate,
         localizedDailyRate,
         localizedCurrency: ctx.currency,
+        originalNightlyRate: nightlyRate,
+        discountedNightlyRate: nightlyRate == null ? null : promotionDisplay(promotionAmount(nightlyRate, pricingPromo), nightlyRate).discountedPrice,
+        originalDailyRate: dailyRate,
+        discountedDailyRate: dailyRate == null ? null : promotionDisplay(promotionAmount(dailyRate, pricingPromo), dailyRate).discountedPrice,
+        promotionDiscount: listingPromotionDiscount,
+        promotion: displayPromo ? {
+          id: displayPromo.id,
+          discountType: displayPromo.discountType,
+          discountValue: displayPromo.discountValue == null ? null : Number(displayPromo.discountValue),
+          labelText: displayPromo.labelText,
+          labelColour: displayPromo.labelColour,
+        } : null,
         // Override the raw `hotelRoomTypes` from the listing spread with the
         // localized room-type prices. Consumers prefer hotelRoomTypes over
         // `roomTypes`, so leaving the raw row here would mislabel them when a
@@ -806,7 +833,7 @@ export async function searchRoutes(app: FastifyInstance) {
         roomTypes: localizedRoomTypes,
         isAccredited: !!listing.approvedAt,
         longStayDiscountEnabled: listing.longStayEnabled,
-        promoBadge,
+        promoBadge: displayPromo ? { labelText: displayPromo.labelText, labelColour: displayPromo.labelColour } : null,
         ...localizedFeeFields,
       };
       if (data.licencePlate !== undefined) {
@@ -1101,6 +1128,9 @@ export async function searchRoutes(app: FastifyInstance) {
 
       const listingsWithLocale = await Promise.all(listings.map(async (l) => {
         const commissionRate = commissionRates.get(l.country ?? null) ?? 0;
+        const promo = await getActivePromotion(l.category, l.country).catch(() => null);
+        const pricingPromo = promo?.applyToBooking ? promo : null;
+        const displayPromo = promo && (promo.applyToBooking || promo.discountType === "label_only") ? promo : null;
         const baseCurrency = l.currency ?? "USD";
         const rawNightlyRate = l.pricePerNight ? Number(l.pricePerNight) : null;
         const nightlyRate = rawNightlyRate;
@@ -1120,6 +1150,10 @@ export async function searchRoutes(app: FastifyInstance) {
           currency: l.currency,
           localizedNightlyRate,
           localizedCurrency: ctx.currency,
+          originalNightlyRate: nightlyRate,
+          discountedNightlyRate: nightlyRate == null ? null : promotionDisplay(promotionAmount(nightlyRate, pricingPromo), nightlyRate).discountedPrice,
+          promotionDiscount: promotionAmount(nightlyRate ?? 0, pricingPromo),
+          promotion: displayPromo ? { id: displayPromo.id, discountType: displayPromo.discountType, discountValue: displayPromo.discountValue == null ? null : Number(displayPromo.discountValue), labelText: displayPromo.labelText, labelColour: displayPromo.labelColour } : null,
           commissionRate,
           serviceFeeRate: SERVICE_FEE_RATE,
           ...primaryPhotoFields(l.photos[0]),
@@ -1260,6 +1294,9 @@ export async function searchRoutes(app: FastifyInstance) {
       return sendSuccess(reply, 200, {
         favourites: await Promise.all(page.map(async (f) => {
           const commissionRate = commissionRates.get(f.listing.country ?? null) ?? 0;
+          const promo = await getActivePromotion(f.listing.category, f.listing.country).catch(() => null);
+          const pricingPromo = promo?.applyToBooking ? promo : null;
+          const displayPromo = promo && (promo.applyToBooking || promo.discountType === "label_only") ? promo : null;
           const baseCurrency = f.listing.currency ?? "USD";
           const rawNightlyRate = f.listing.pricePerNight ? Number(f.listing.pricePerNight) : null;
           const nightlyRate = rawNightlyRate;
@@ -1283,6 +1320,10 @@ export async function searchRoutes(app: FastifyInstance) {
               currency: f.listing.currency,
               localizedNightlyRate,
               localizedCurrency: ctx.currency,
+              originalNightlyRate: nightlyRate,
+              discountedNightlyRate: nightlyRate == null ? null : promotionDisplay(promotionAmount(nightlyRate, pricingPromo), nightlyRate).discountedPrice,
+              promotionDiscount: promotionAmount(nightlyRate ?? 0, pricingPromo),
+              promotion: displayPromo ? { id: displayPromo.id, discountType: displayPromo.discountType, discountValue: displayPromo.discountValue == null ? null : Number(displayPromo.discountValue), labelText: displayPromo.labelText, labelColour: displayPromo.labelColour } : null,
               commissionRate,
               serviceFeeRate: SERVICE_FEE_RATE,
               ...primaryPhotoFields(f.listing.photos[0]),
@@ -1397,6 +1438,9 @@ export async function searchRoutes(app: FastifyInstance) {
       return sendSuccess(reply, 200, {
         recentlyViewed: await Promise.all(validViews.map(async (v) => {
           const commissionRate = commissionRates.get(v.listing.country ?? null) ?? 0;
+          const promo = await getActivePromotion(v.listing.category, v.listing.country).catch(() => null);
+          const pricingPromo = promo?.applyToBooking ? promo : null;
+          const displayPromo = promo && (promo.applyToBooking || promo.discountType === "label_only") ? promo : null;
           const baseCurrency = v.listing.currency ?? "USD";
           const rawNightlyRate = v.listing.pricePerNight ? Number(v.listing.pricePerNight) : null;
           const nightlyRate = rawNightlyRate;
@@ -1419,6 +1463,10 @@ export async function searchRoutes(app: FastifyInstance) {
               currency: v.listing.currency,
               localizedNightlyRate,
               localizedCurrency: ctx.currency,
+              originalNightlyRate: nightlyRate,
+              discountedNightlyRate: nightlyRate == null ? null : promotionDisplay(promotionAmount(nightlyRate, pricingPromo), nightlyRate).discountedPrice,
+              promotionDiscount: promotionAmount(nightlyRate ?? 0, pricingPromo),
+              promotion: displayPromo ? { id: displayPromo.id, discountType: displayPromo.discountType, discountValue: displayPromo.discountValue == null ? null : Number(displayPromo.discountValue), labelText: displayPromo.labelText, labelColour: displayPromo.labelColour } : null,
               commissionRate,
               serviceFeeRate: SERVICE_FEE_RATE,
               ...primaryPhotoFields(v.listing.photos[0]),
