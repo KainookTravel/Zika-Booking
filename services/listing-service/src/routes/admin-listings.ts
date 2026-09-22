@@ -3027,6 +3027,7 @@ export async function adminListingRoutes(app: FastifyInstance) {
             adults: { type: "integer", nullable: true },
             children: { type: "integer", nullable: true },
             subtotal: { type: "number" },
+            discountAmount: { type: "number" },
             voucherDiscount: { type: "number" },
             deliveryFee: { type: "number" },
              serviceFee: { type: "number" },
