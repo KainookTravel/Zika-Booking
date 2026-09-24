@@ -36,15 +36,10 @@ export async function searchRoutes(app: FastifyInstance) {
     // the entire category.
     const placeResolved = q["place_resolved"] === "true";
     const requestedSearchMode = q["search_mode"];
-    // Radius is optional. When omitted, browse/text searches rank nearest-first
-    // with no distance cap; an explicit place/destination search falls back to
-    // DEFAULT_PLACE_RADIUS_KM below.
+    // Radius is optional. It bounds local place matching, while nearby
+    // recommendations have no distance cap.
     const radiusKm = q["radius_km"] ? parseInt(q["radius_km"], 10) : undefined;
-    // Default radius for an explicit place/destination search when the caller
-    // doesn't supply one. It is fixed and does not depend on how many listings
-    // exist, so the same destination always returns the same set. The old code
-    // widened the radius until it found 6 listings, which hid nearby listings
-    // and made counts differ between searches for the same place.
+    // A coordinate guard for matching the selected place's name.
     const DEFAULT_PLACE_RADIUS_KM = 100;
     const checkIn = q["check_in"];
     const checkOut = q["check_out"];
@@ -110,9 +105,8 @@ export async function searchRoutes(app: FastifyInstance) {
     const validStatuses = category === "hotel" ? ["approved"] : ["active"];
 
     // ── Single SQL search core ──────────────────────────────────────────────
-    // All filtering, ranking (exact, then partial, then nearby), availability
-    // and rating run in Postgres. The query holds only the requested page in
-    // memory, never the whole candidate set.
+    // Filtering, availability, and ranking run in Postgres. The query holds
+    // only the requested page in memory.
     const priceCol = category === "car" ? "price_per_day" : "price_per_night";
 
     let p = 0;
@@ -249,25 +243,14 @@ export async function searchRoutes(app: FastifyInstance) {
       push(buildUserRatingFilterClause(next, ratingMin), ratingMin);
     }
 
-    // Geo anchor (optional). Distance ranking needs both coordinates. No
-    // artificial radius cap: radius_km narrows only when explicitly chosen,
-    // otherwise results sort nearest-first.
-    //
-    // For a text query the anchor is only trustworthy when the typed place
-    // actually resolved (place_resolved=true). Otherwise we run in text-only
-    // mode (exact/partial matches only) so an unresolved/junk term never
-    // returns the whole category disguised as "nearby".
+    // Keep the common filters for the nearby query if this place has no matches.
+    const baseWhere = [...where];
+    const baseParamCount = params.length;
     const hasGeoCoords = Number.isFinite(lat) && Number.isFinite(lng);
     const textOnly = searchMode === "text";
     const hasGeo = hasGeoCoords && searchMode !== "text";
     let lngRef: string | null = null;
     let latRef: string | null = null;
-    // Effective search radius. Set explicitly, not from the listing count. A
-    // destination (place) search without an explicit radius uses
-    // DEFAULT_PLACE_RADIUS_KM, so the same place always returns the same set. An
-    // explicit radius_km (the user-controlled "widen") is used as given. Browse
-    // and text searches apply no radius. They rank nearest-first and keep every
-    // listing instead of dropping far ones.
     const placeRadius =
       searchMode === "place" && radiusKm == null ? DEFAULT_PLACE_RADIUS_KM : radiusKm;
     if (hasGeo) {
@@ -275,10 +258,22 @@ export async function searchRoutes(app: FastifyInstance) {
       params.push(lng);
       latRef = next();
       params.push(lat);
-      if (placeRadius != null) {
-        // Listings without coordinates bypass the radius filter instead of
-        // being dropped from results. When ranking by distance, the COALESCE
-        // sentinel in distance_km sorts them after every located result.
+      if (searchMode === "place") {
+        // Match the selected place's primary name, then use its coordinates to
+        // distinguish places with the same name elsewhere.
+        const primaryName = ((textQuery || placeName).split(",")[0] ?? "").trim();
+        const nameRef = next();
+        params.push(primaryName);
+        const normalizedName = `public.f_unaccent(lower(${nameRef}))`;
+        push(`l.location IS NOT NULL AND (
+          public.f_unaccent(lower(l.town)) = ${normalizedName}
+          OR public.f_unaccent(lower(l.neighborhood)) = ${normalizedName}
+          OR position(${normalizedName} in public.f_unaccent(lower(l.address))) > 0
+        )`);
+        if (placeRadius != null) {
+          push(`public.ST_DWithin(l.location, public.ST_SetSRID(public.ST_MakePoint(${lngRef}, ${latRef}), 4326)::public.geography, ${next()})`, placeRadius * 1000);
+        }
+      } else if (placeRadius != null) {
         push(
           `(l.location IS NULL OR public.ST_DWithin(l.location, public.ST_SetSRID(public.ST_MakePoint(${lngRef}, ${latRef}), 4326)::public.geography, ${next()}))`,
           placeRadius * 1000,
@@ -289,7 +284,7 @@ export async function searchRoutes(app: FastifyInstance) {
     // Free-text rank. Accent-insensitive via the immutable f_unaccent wrapper
     // (unaccent itself is not immutable, so it cannot be indexed directly).
     let textRankExpr = "0 AS text_rank";
-    if (textQuery) {
+    if (textOnly) {
       const normQ = `public.f_unaccent(lower(${next()}))`;
       params.push(textQuery);
       const fields = ["l.name", "l.town", "l.neighborhood", "l.address", "l.description", "l.car_make", "l.car_model"];
@@ -298,9 +293,31 @@ export async function searchRoutes(app: FastifyInstance) {
       textRankExpr = `CASE WHEN ${exact.join(" OR ")} THEN 0 WHEN ${partial.join(" OR ")} THEN 1 ELSE 2 END AS text_rank`;
       // Text-only mode: the destination did not resolve to a real location, so
       // only genuine text matches (exact/partial) are eligible. No nearby fill.
-      if (textOnly) {
-        push(`(${exact.join(" OR ")} OR ${partial.join(" OR ")})`);
-      }
+      push(`(${exact.join(" OR ")} OR ${partial.join(" OR ")})`);
+    }
+
+    const countFromSql = `FROM listing.listings l${priceJoins ? "\n      " + priceJoins : ""}`;
+    const countMatches = async (countParams: unknown[]) => {
+      const rows = await prisma.$queryRawUnsafe<Array<{ total: number }>>(
+        `SELECT COUNT(*)::int AS total ${countFromSql} WHERE ${where.join("\n      AND ")}`,
+        ...countParams,
+      );
+      return rows[0]?.total ?? 0;
+    };
+    let total = await countMatches(
+      searchMode === "browse" && placeRadius == null ? params.slice(0, baseParamCount) : params,
+    );
+    let resultType: "local" | "nearby" | "none" = total > 0 ? "local" : "none";
+    if (searchMode === "place" && total === 0) {
+      where.splice(0, where.length, ...baseWhere, "l.location IS NOT NULL");
+      params.splice(baseParamCount);
+      p = baseParamCount;
+      lngRef = next();
+      params.push(lng);
+      latRef = next();
+      params.push(lat);
+      total = await countMatches(params.slice(0, baseParamCount));
+      resultType = total > 0 ? "nearby" : "none";
     }
 
     const pointExpr = hasGeo && lngRef && latRef
@@ -326,7 +343,7 @@ export async function searchRoutes(app: FastifyInstance) {
     let priceOrderExpr: string | null = null;
     let priceOrderParams: unknown[] = [];
     const priceSorting = sort === "price_asc" || sort === "price_desc";
-    if (priceSorting) {
+    if (priceSorting && resultType !== "nearby") {
       const usdToTargetRate = targetCurrency ? await getExchangeRate("USD", targetCurrency) : null;
       const price = buildGuestPriceExpr({ category, targetCurrency, usdToTargetRate, next });
       priceOrderExpr = price.expr;
@@ -335,12 +352,15 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     const orderCols: string[] = [];
-    if (textQuery) orderCols.push("text_rank ASC");
-    if (sort === "price_asc") orderCols.push(`${priceOrderExpr ?? `l.${priceCol}`} ASC NULLS LAST`);
-    else if (sort === "price_desc") orderCols.push(`${priceOrderExpr ?? `l.${priceCol}`} DESC NULLS LAST`);
-    else if (sort === "newest") orderCols.push("l.created_at DESC");
-    else if (sort === "user_ratings_desc") orderCols.push(userRatingsOrderExpr());
-    else orderCols.push(hasGeo ? "distance_km ASC" : "l.created_at DESC");
+    if (resultType === "nearby") orderCols.push("distance_km ASC", "l.id ASC");
+    else {
+      if (textOnly) orderCols.push("text_rank ASC");
+      if (sort === "price_asc") orderCols.push(`${priceOrderExpr ?? `l.${priceCol}`} ASC NULLS LAST`);
+      else if (sort === "price_desc") orderCols.push(`${priceOrderExpr ?? `l.${priceCol}`} DESC NULLS LAST`);
+      else if (sort === "newest") orderCols.push("l.created_at DESC");
+      else if (sort === "user_ratings_desc") orderCols.push(userRatingsOrderExpr());
+      else orderCols.push(hasGeo ? "distance_km ASC" : "l.created_at DESC");
+    }
 
     // Pagination (cursor = offset)
     const paginationStart = params.length;
@@ -357,20 +377,7 @@ export async function searchRoutes(app: FastifyInstance) {
     `;
     params.push(limit, cursor);
 
-    // The text-query param appears in the COUNT's WHERE only in text-only mode;
-    // in resolved mode it lives only in the SELECT (text_rank), so the COUNT
-    // must exclude it there or Postgres rejects the bind.
-    const countParamCount = paginationStart - (textQuery && !textOnly ? 1 : 0);
-
-    const countSql = `SELECT COUNT(*)::int AS total ${fromSql} WHERE ${whereSql}`;
-
-    // One count query. The radius is fixed above, so the result set is stable
-    // for a given query.
-    const countRows = await prisma.$queryRawUnsafe<Array<{ total: number }>>(
-      countSql, ...params.slice(0, countParamCount),
-    );
-    const total = countRows[0]?.total ?? 0;
-    const effectiveRadiusKm: number | null = placeRadius ?? null;
+    const effectiveRadiusKm: number | null = resultType === "nearby" ? null : placeRadius ?? null;
 
     const pageRows = await prisma.$queryRawUnsafe<Array<{ id: string; distance_km: number | null; lat: number | null; lng: number | null }>>(
       pageSql, ...params,
@@ -572,12 +579,12 @@ export async function searchRoutes(app: FastifyInstance) {
       availableCount: available,
       nextCursor,
       results,
-      // `expanded` is true only when the user explicitly widened past the
-      // default destination radius (an opt-in "search nearby areas"), never an
-      // automatic global fallback.
+      // `expanded` records an explicit radius choice, independently of the
+      // automatic nearby fallback.
       searchArea: {
         effectiveRadiusKm,
         expanded: placeRadius != null && placeRadius > DEFAULT_PLACE_RADIUS_KM,
+        resultType,
       },
     });
     } catch (err) {
@@ -596,10 +603,10 @@ export async function searchRoutes(app: FastifyInstance) {
           category: { type: "string", enum: ["hotel", "apartment", "car"], description: "Listing category (required)" },
           lat: { type: "number", description: "Latitude of search centre. Optional. When omitted, results are not distance-ranked." },
           lng: { type: "number", description: "Longitude of search centre. Optional. When omitted, results are not distance-ranked." },
-          q: { type: "string", description: "Free-text destination search. Matches listing name and location fields accent-insensitively. Ranked exact, then partial, then nearby." },
-          place_resolved: { type: "string", enum: ["true", "false"], description: "Set true only when the typed destination resolved to a real geocoded location; unlocks the nearby fallback for q. When false/absent, q returns exact/partial text matches only." },
+          q: { type: "string", description: "Selected place name or free-text search. Place searches use the primary name against listing location fields." },
+          place_resolved: { type: "string", enum: ["true", "false"], description: "Legacy hint for callers without search_mode. Set true only for a selected geocoded place." },
           place_name: { type: "string", description: "Human-readable place name (for logging)" },
-          radius_km: { type: "integer", description: "Search radius in km. Applied only when provided. When omitted, results are nearest-first with no cap." },
+          radius_km: { type: "integer", description: "Local matching radius in km for place searches (default 100). Nearby recommendations have no cap." },
           check_in: { type: "string", description: "Hotel/apartment check-in date (YYYY-MM-DD)" },
           check_out: { type: "string", description: "Hotel/apartment check-out date (YYYY-MM-DD)" },
           pickup_datetime: { type: "string", description: "Car pickup datetime (ISO 8601)" },
