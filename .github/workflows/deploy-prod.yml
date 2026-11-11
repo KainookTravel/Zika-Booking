@@ -112,6 +112,9 @@ jobs:
         run: |
           set -euo pipefail
           SHA="${{ github.sha }}"
+          # Remembers which task-def revision each service was deployed to, so we
+          # can detect circuit-breaker rollbacks after the wait below.
+          declare -A DEPLOYED
           for spec in \
             "kainook-auth:auth-service:zika/auth-service" \
             "kainook-listing:listing-service:zika/listing-service" \
@@ -127,7 +130,25 @@ jobs:
             # and made the container exit without starting the server.
             NEW_TD=$(printf '%s' "$TD" | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt, .taskDefinitionId) | .containerDefinitions[].image = $image | .containerDefinitions[] |= del(.command, .entryPoint)' --arg image "$NEW_IMAGE")
             REV=$(aws ecs register-task-definition --cli-input-json "$NEW_TD" --query 'taskDefinition.revision' --output text)
+            DEPLOYED[$ecs_svc]=$REV
             aws ecs update-service --cluster kainook-prod-cluster --service "$ecs_svc" --task-definition "$ecs_svc:$REV" --force-new-deployment --region af-south-1
             echo "deployed $ecs_svc -> $NEW_IMAGE (task-def rev $REV)"
           done
           aws ecs wait services-stable --cluster kainook-prod-cluster --services kainook-auth kainook-listing kainook-payment kainook-web kainook-admin --region af-south-1
+
+          # The deployment circuit breaker (rollback=true) can roll a failed
+          # deploy back to the previous revision. The service then reports
+          # "stable" on the OLD code, so services-stable alone would pass.
+          # Verify every service is actually running the revision we just
+          # registered, and fail the job loudly if any was rolled back.
+          FAILED=0
+          for svc in "${!DEPLOYED[@]}"; do
+            CUR=$(aws ecs describe-services --cluster kainook-prod-cluster --services "$svc" --region af-south-1 --query 'services[0].taskDefinition' --output text)
+            if [[ "$CUR" != *":${DEPLOYED[$svc]}" ]]; then
+              echo "::error::$svc was ROLLED BACK to ${CUR##*/} - new code is NOT live"
+              FAILED=1
+            else
+              echo "verified $svc is live on rev ${DEPLOYED[$svc]}"
+            fi
+          done
+          [ "$FAILED" = 0 ]
